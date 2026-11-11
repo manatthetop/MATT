@@ -1855,6 +1855,16 @@ class TestArp(unittest.TestCase):
         prose = core.stage2_prose(f)
         self.assertIn("10.20.4.1 is at aa:bb:cc:dd:ee:ff", prose)
 
+    def test_arp_finding_is_attributed_to_its_sender(self):
+        """ARP never carries sport/dport/src/dst (it is not TCP/UDP, so the
+        capture's summary-line parser does not match it), so without this the
+        finding's host fell back to the generic "the wire" placeholder even
+        though the sender IP is right there in the ARP packet itself."""
+        pkt = self._arp(1, b"\xca\xbe\xe5\xb4\xa4\xc5", "10.20.5.22",
+                        b"\x00" * 6, "10.20.5.1")
+        f = core.candidates_from_payload(pkt)[0]
+        self.assertEqual(f["host"], "10.20.5.22")
+
     def test_non_arp_bytes_untouched(self):
         self.assertIsNone(core.arp_info(b"not an arp packet, just text"))
         self.assertIsNone(core.arp_info(b"\x00\x01\x08\x00\x06\x04short"))
@@ -1926,6 +1936,24 @@ class TestCredentialDestination(unittest.TestCase):
         self.assertIn("10.20.5.22", f["prose"])
         self.assertIn("10.20.4.9:21", f["prose"])
         self.assertNotIn("raw", f["prose"])
+
+    def test_src_ip_outranks_the_wire_host_mirror(self):
+        """MATT's own live format stores the same bytes twice: once under
+        report["payloads"] (with src/dst) and once under
+        report["hosts"]["the wire"]["payloads"] (the generic group mirror,
+        processed first). A naive "group host wins" rule would let that
+        placeholder "the wire" win over the specific source IP on every
+        single finding, since the per-host copy is deduped against first --
+        this is exactly the bug a live capture against this repo showed."""
+        entry = {"payload": b"some undecodable binary blob here".hex(),
+                 "sport": 138, "dport": 138,
+                 "src": "10.20.4.85", "dst": "10.20.5.255"}
+        report = {"payloads": [dict(entry)],
+                  "hosts": {"the wire": {"payloads": [dict(entry)]}}}
+        findings = core.analyze(report)["analysis"]["findings"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["host"], "10.20.4.85")
+        self.assertEqual(findings[0]["target"], "10.20.5.255:138")
 
     def test_decoder_target_outranks_capture_dst(self):
         """An HTTP Host header is the application's own idea of its

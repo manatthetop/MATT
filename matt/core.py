@@ -1464,7 +1464,8 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
             summary = (f"who-has {arp['target_ip']} tell {arp['sender_ip']}"
                       if arp["op"] == "request" else
                       f"{arp['sender_ip']} is-at {arp['sender_mac']}")
-            add("arp", None, summary, "arp", credential_bearing=False, **arp)
+            add("arp", None, summary, "arp", credential_bearing=False,
+                host=arp["sender_ip"], **arp)
 
     # 5g. a handful of common, no-secret LAN discovery/broadcast protocols:
     #     labeled by their own signature so they read as what they are,
@@ -1594,7 +1595,14 @@ def extract_candidates(report: dict) -> list:
                 src_ip = meta.pop("src", None)
                 dst_ip = meta.pop("dst", None)
                 dport_val = meta.get("dport")
-                host_here = meta.pop("host", host) or host or src_ip
+                # An explicit per-entry host wins outright; after that, a
+                # specific source IP off THIS packet beats the group's own
+                # label, because that label is "the wire" in MATT's own live
+                # format -- a structural placeholder for "no host grouping
+                # was done", not a real identity, and must never outrank an
+                # actual fact about whose packet this was.
+                explicit_host = meta.pop("host", None)
+                host_here = explicit_host or src_ip or host
                 protocol = meta.pop("protocol", "") or ""
                 # Ports are decode hints, not finding fields: resolve the service
                 # port here and drop them so findings keep their shape.
@@ -1617,7 +1625,7 @@ def extract_candidates(report: dict) -> list:
                 seen_blobs.add(raw)
             source = "wire" if not protocol else str(protocol)
             for item in candidates_from_payload(raw, source=source, port=svc_port):
-                if host_here:
+                if host_here and not item.get("host"):
                     item["host"] = host_here
                 if protocol and not item.get("protocol"):
                     item["protocol"] = protocol
