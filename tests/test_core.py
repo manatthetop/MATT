@@ -1144,6 +1144,73 @@ class TestCaptureHelpers(unittest.TestCase):
                              "tshark -a swallowed the next flag: %r" % (cmd,))
             self.assertTrue(arg.startswith("duration:"), cmd)
 
+    def _ipv4_tcp_frame(self, payload: bytes, ethernet: bool = True) -> bytes:
+        """Build one realistic Ethernet(optional)+IPv4+TCP frame carrying
+        ``payload``, the way a real tcpdump/tshark capture actually looks on
+        the wire (unlike the bare-payload fixtures used elsewhere in this
+        file, which model the output of hexdump_row/reassembly in isolation)."""
+        tcp_len = 20 + len(payload)
+        tcp = (b"\xc9\xa6\x00\x15"          # sport 51622, dport 21
+              + b"\x00\x00\x00\x01\x00\x00\x00\x01"  # seq, ack
+              + bytes([(5 << 4)]) + b"\x18\x00\x80"  # data offset 20, flags, window
+              + b"\xfe\x47\x00\x00"          # checksum, urgent ptr
+              + payload)
+        total_len = 20 + tcp_len
+        ip = (b"\x45\x00" + total_len.to_bytes(2, "big")
+              + b"\xf0\x03\x40\x00\x40\x06\x00\x00"  # id, flags/frag, ttl, proto=TCP, csum(unchecked)
+              + b"\x7f\x00\x00\x01" + b"\x7f\x00\x00\x01")  # 127.0.0.1 -> 127.0.0.1
+        frame = ip + tcp
+        if ethernet:
+            frame = b"\xaa" * 6 + b"\xbb" * 6 + b"\x08\x00" + frame
+        return frame
+
+    def test_strip_wire_headers_recovers_app_data_from_a_real_frame(self):
+        """The bug this guards: a real capture is a whole frame (L2+IP+TCP),
+        not bare app bytes. Before strip_wire_headers existed, capture_payloads
+        handed decoders the WHOLE frame, so every ^-anchored decoder (FTP,
+        POP3, IMAP, SMTP, Telnet, the HTTP Host/request-line scan) silently
+        found nothing on real traffic -- confirmed live on loopback, where a
+        plaintext FTP USER/PASS login produced 0 credential-bearing findings
+        until this strip was added."""
+        payload = b"USER alice\r\nPASS Sup3rSecret!\r\n"
+        for ethernet in (True, False):
+            frame = self._ipv4_tcp_frame(payload, ethernet=ethernet)
+            self.assertEqual(capture.strip_wire_headers(frame), payload,
+                             "ethernet=%s" % ethernet)
+
+    def test_strip_wire_headers_leaves_unparseable_bytes_alone(self):
+        """On any doubt (not IP-shaped, protocol not TCP/UDP, lengths that
+        don't fit) the original bytes come back unchanged -- never truncated
+        or corrupted guesswork. This is also what keeps every pre-existing
+        bare-payload fixture elsewhere in this file working unmodified."""
+        text = b"USER alice\r\nPASS s3cret\r\n"
+        self.assertEqual(capture.strip_wire_headers(text), text)
+        self.assertEqual(capture.strip_wire_headers(b"short"), b"short")
+
+    def test_capture_payloads_decodes_a_real_captured_credential(self):
+        """End-to-end through capture_payloads: a tcpdump -X hexdump of a real
+        Ethernet+IPv4+TCP frame carrying an FTP login must decode to a
+        credential-bearing finding, not a header-mangled 'raw' blob."""
+        payload = b"USER alice\r\nPASS Sup3rSecret!\r\n"
+        frame = self._ipv4_tcp_frame(payload, ethernet=True)
+        rows = ["11:11:11.1 IP 10.0.0.9.51622 > 10.0.0.5.21: Flags [P.]"]
+        for i in range(0, len(frame), 16):
+            chunk = frame[i:i + 16]
+            hx = " ".join(chunk[j:j + 2].hex() for j in range(0, len(chunk), 2))
+            rows.append("\t0x%04x:  %s" % (i, hx))
+        fake = subprocess.CompletedProcess(["tcpdump"], 0,
+                                           stdout="\n".join(rows) + "\n", stderr="")
+        result = capture.capture_payloads("wlan0", duration=0.01,
+                                          capture_tool="tcpdump",
+                                          runner=lambda c, k: fake)
+        self.assertEqual(len(result["payloads"]), 1, result["payloads"])
+        self.assertEqual(bytes.fromhex(result["payloads"][0]["payload"]), payload)
+        findings = core.analyze({"payloads": result["payloads"]})["analysis"]["findings"]
+        creds = [f for f in findings if f.get("credential_bearing")]
+        self.assertEqual(len(creds), 1, findings)
+        self.assertEqual(creds[0]["kind"], "ftp")
+        self.assertEqual(creds[0]["username"], "alice")
+
     def test_discover_gateway_skips_short_route_lines(self):
         """A truncated routing line must be skipped, not crash on fields[3]."""
         route = "Iface Dest Gateway\n" "eth0 00000000 0102A8C0\n"  # only 3 cols

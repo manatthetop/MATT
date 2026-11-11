@@ -44,6 +44,7 @@ __all__ = [
     "start_ettercap",
     "stop_daemon",
     "capture_note",
+    "strip_wire_headers",
     "capture_payloads",
     "build_report",
     "find_reports",
@@ -369,6 +370,80 @@ def parse_summary_ports(line: str) -> "dict | None":
         return None
 
 
+_ETHERTYPE_IPV4 = b"\x08\x00"
+_ETHERTYPE_IPV6 = b"\x86\xdd"
+
+
+def strip_wire_headers(raw: bytes) -> bytes:
+    """Return just the TCP/UDP application bytes out of one captured frame.
+
+    tcpdump -X / tshark -x hexdump the WHOLE wire frame: an Ethernet header
+    (when the link layer has one -- loopback does not), then IP, then TCP or
+    UDP, and only THEN the application bytes a credential decoder actually
+    wants. Handed that whole frame unstripped, every ^-anchored decoder
+    (FTP/POP3/IMAP/SMTP/Telnet, the HTTP Host/request-line scan) fails: the
+    application data never starts at offset 0 or right after a '\\n' -- it
+    starts right after opaque binary header bytes, so a plaintext "USER
+    alice\\r\\nPASS secret\\r\\n" sitting right there in the payload is never
+    found. This is the strip that makes those decoders see what they expect.
+
+    Only strips when the shape at each layer actually checks out (a plausible
+    Ethernet header + IPv4/IPv6 + TCP/UDP, with lengths that fit inside
+    ``raw``); on any doubt it returns ``raw`` unchanged, because handing a
+    decoder the whole frame when this cannot be sure is safer than silently
+    truncating or corrupting bytes it did not really understand.
+    """
+    if len(raw) < 20:
+        return raw
+
+    offset = 0
+    if raw[0] >> 4 not in (4, 6):
+        # Not IP at offset 0 (a loopback-style capture, which has no link
+        # layer header at all): try skipping a 14-byte Ethernet header,
+        # gated on EtherType so a non-IP frame (ARP, 802.1Q, STP, ...) is
+        # left alone instead of being misparsed as IP.
+        if len(raw) < 14 + 20 or raw[12:14] not in (_ETHERTYPE_IPV4, _ETHERTYPE_IPV6):
+            return raw
+        offset = 14
+        if raw[offset] >> 4 not in (4, 6):
+            return raw
+
+    version = raw[offset] >> 4
+    if version == 4:
+        ihl = (raw[offset] & 0x0F) * 4
+        if ihl < 20 or offset + ihl > len(raw):
+            return raw
+        total_len = (raw[offset + 2] << 8) | raw[offset + 3]
+        protocol = raw[offset + 9]
+        l4_start = offset + ihl
+        ip_end = (offset + total_len if total_len and offset + total_len <= len(raw)
+                 else len(raw))
+    else:  # version == 6
+        if offset + 40 > len(raw):
+            return raw
+        payload_len = (raw[offset + 4] << 8) | raw[offset + 5]
+        protocol = raw[offset + 6]       # next header; extension headers not walked
+        l4_start = offset + 40
+        ip_end = (l4_start + payload_len if payload_len and l4_start + payload_len <= len(raw)
+                 else len(raw))
+
+    if protocol == 6:        # TCP
+        if l4_start + 20 > ip_end:
+            return raw
+        data_offset = (raw[l4_start + 12] >> 4) * 4
+        if data_offset < 20 or l4_start + data_offset > ip_end:
+            return raw
+        payload_start = l4_start + data_offset
+    elif protocol == 17:      # UDP
+        if l4_start + 8 > ip_end:
+            return raw
+        payload_start = l4_start + 8
+    else:
+        return raw            # ICMP, GRE, ... -- nothing MATT decodes as app data
+
+    return raw[payload_start:ip_end]
+
+
 def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None,
                      dry_run: bool = False, runner=None, max_packets: int = 0) -> dict:
     """Grab payload bytes for ``duration`` seconds and return raw hex payloads.
@@ -471,12 +546,19 @@ def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None
     if current:
         packets.append(("".join(current), current_meta))
     for packet, meta in packets:
-        if packet:
-            entry = {"payload": packet, "protocol": "raw"}
-            if meta:
-                entry["sport"] = meta.get("sport")
-                entry["dport"] = meta.get("dport")
-            result["payloads"].append(entry)
+        if not packet:
+            continue
+        try:
+            stripped = strip_wire_headers(bytes.fromhex(packet)).hex()
+        except ValueError:  # pragma: no cover - packet is always hex here
+            stripped = packet
+        if not stripped:   # a header-only frame (bare ACK, etc): no app data
+            continue
+        entry = {"payload": stripped, "protocol": "raw"}
+        if meta:
+            entry["sport"] = meta.get("sport")
+            entry["dport"] = meta.get("dport")
+        result["payloads"].append(entry)
 
     if proc.returncode not in (0, None) and not result["payloads"]:
         result["note"] = capture_note(proc.returncode)
