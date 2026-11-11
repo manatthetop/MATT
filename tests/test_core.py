@@ -1699,6 +1699,48 @@ class TestCleartextLogins(unittest.TestCase):
         self.assertEqual(
             core.candidates_from_payload(up, port=21)[0]["kind"], "ftp")
 
+    @staticmethod
+    def _pkt(src, sport, dst, dport, data):
+        return {"payload": data.hex(), "protocol": "raw",
+                "src": src, "dst": dst, "sport": sport, "dport": dport}
+
+    def test_multipacket_ftp_login_is_reassembled_across_the_flow(self):
+        """Real FTP sends USER and PASS in SEPARATE packets, split by the 331
+        reply, so no single payload holds the pair. The flow must be rejoined."""
+        report = {"payloads": [
+            self._pkt("10.0.0.9", 5000, "10.0.0.5", 21, b"220 ready\r\n"),
+            self._pkt("10.0.0.9", 5000, "10.0.0.5", 21, b"USER corpuser\r\n"),
+            self._pkt("10.0.0.5", 21, "10.0.0.9", 5000, b"331 need pass\r\n"),
+            self._pkt("10.0.0.9", 5000, "10.0.0.5", 21, b"PASS Sup3rSecret!\r\n"),
+        ]}
+        findings = core.analyze(report)["analysis"]["findings"]
+        ftp = [f for f in findings if f["kind"] == "ftp"]
+        self.assertEqual(len(ftp), 1, findings)
+        self.assertEqual(ftp[0]["username"], "corpuser")
+        self.assertEqual(ftp[0]["candidate"], "corpuser:Sup3rSecret!")
+        self.assertEqual(ftp[0]["host"], "10.0.0.9")   # the client that dialed :21
+
+    def test_multipacket_telnet_login_is_reassembled(self):
+        report = {"payloads": [
+            self._pkt("10.0.0.9", 5001, "10.0.0.7", 23, b"login: "),
+            self._pkt("10.0.0.9", 5001, "10.0.0.7", 23, b"admin\r\n"),
+            self._pkt("10.0.0.9", 5001, "10.0.0.7", 23, b"Password: "),
+            self._pkt("10.0.0.9", 5001, "10.0.0.7", 23, b"R0uterPass!\r\n"),
+        ]}
+        tel = [f for f in core.analyze(report)["analysis"]["findings"]
+               if f["kind"] == "telnet"]
+        self.assertEqual((tel[0]["username"], tel[0]["candidate"]),
+                         ("admin", "admin:R0uterPass!"))
+
+    def test_single_packet_login_is_not_duplicated_by_the_flow_pass(self):
+        report = {"payloads": [
+            self._pkt("10.0.0.9", 5002, "10.0.0.6", 110, b"USER carol\r\nPASS pw\r\n"),
+            self._pkt("10.0.0.6", 110, "10.0.0.9", 5002, b"+OK\r\n"),
+        ]}
+        pop = [f for f in core.analyze(report)["analysis"]["findings"]
+               if f["kind"] == "pop3"]
+        self.assertEqual(len(pop), 1, "flow pass must not double a single-packet cred")
+
     def test_service_port_resolution_prefers_a_known_port_either_side(self):
         # a server->client packet carries the service port as the SOURCE port
         self.assertEqual(core._pick_service_port(54321, 110), 110)

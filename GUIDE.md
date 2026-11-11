@@ -177,6 +177,11 @@ MATT is built for real corporate networks:
   are reassembled whole, and credentials buried deep inside them are still
   decoded — there is no 200-packet or row-count cap truncating the capture
   (`--duration` bounds it; `--max-packets` caps it when you want).
+- **Multi-packet logins.** Real FTP, POP3, IMAP, SMTP and telnet send the
+  username and password in *separate* packets, split by the server's replies, so
+  no single packet holds the pair. MATT rejoins each TCP flow and decodes the
+  credential from the whole conversation — the common case a per-packet decoder
+  would miss entirely.
 - **Every host named.** Each finding carries its **source host** and **where the
   credential goes** (server name, SPN, URL), so a report with dozens of
   credentials is never ambiguous.

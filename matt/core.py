@@ -833,6 +833,10 @@ _PORT_PROTOCOL = {
     993: "imap", 995: "pop3",
 }
 
+# Cleartext protocols whose credentials routinely span several packets, so they
+# are recovered from a reassembled flow buffer (not just a single payload).
+_CLEARTEXT_FLOW_KINDS = {"ftp", "pop3", "imap", "smtp", "ldap", "snmp", "telnet"}
+
 
 def service_protocol(*ports) -> "str | None":
     """The protocol for the first of ``ports`` that is a known service port, or
@@ -1571,6 +1575,7 @@ def extract_candidates(report: dict) -> list:
 
     out: list = []
     seen_blobs: set = set()
+    flows: dict = {}        # TCP flow -> ordered raw parts, for multi-packet creds
     for host, items in groups:
         for entry in items:
             meta: dict = {}
@@ -1595,6 +1600,7 @@ def extract_candidates(report: dict) -> list:
                 src_ip = meta.pop("src", None)
                 dst_ip = meta.pop("dst", None)
                 dport_val = meta.get("dport")
+                sport_val = meta.get("sport")
                 # An explicit per-entry host wins outright; after that, a
                 # specific source IP off THIS packet beats the group's own
                 # label, because that label is "the wire" in MATT's own live
@@ -1612,7 +1618,7 @@ def extract_candidates(report: dict) -> list:
                 blob = entry
                 host_here = host
                 svc_port = None
-                src_ip = dst_ip = dport_val = None
+                src_ip = dst_ip = dport_val = sport_val = None
 
             raw = _coerce_bytes(blob)
             # The same wire bytes may appear under more than one group -- the
@@ -1623,6 +1629,22 @@ def extract_candidates(report: dict) -> list:
                 continue
             if raw:
                 seen_blobs.add(raw)
+                # Record this packet under its TCP flow (unordered endpoint pair),
+                # so a USER packet and the PASS packet that answered a server
+                # prompt later can be rejoined below. Only packets the capture
+                # tagged with both endpoints take part.
+                if (src_ip and dst_ip and sport_val is not None
+                        and dport_val is not None):
+                    key = frozenset({(src_ip, sport_val), (dst_ip, dport_val)})
+                    fl = flows.get(key)
+                    if fl is None:
+                        fl = flows[key] = {"parts": [], "svc": svc_port,
+                                           "host": None, "target": None}
+                    fl["parts"].append(raw)
+                    # the client is the side that dialed the service port
+                    if svc_port is not None and dport_val == svc_port:
+                        fl["host"] = fl["host"] or src_ip
+                        fl["target"] = fl["target"] or dst_ip
             source = "wire" if not protocol else str(protocol)
             for item in candidates_from_payload(raw, source=source, port=svc_port):
                 if host_here and not item.get("host"):
@@ -1633,6 +1655,38 @@ def extract_candidates(report: dict) -> list:
                     item["target"] = f"{dst_ip}:{dport_val}" if dport_val else dst_ip
                 item.update({k: v for k, v in meta.items() if k not in item})
                 out.append(item)
+
+    # Multi-packet cleartext logins: FTP/POP3/IMAP/SMTP/telnet send USER and
+    # PASS (or the bind / AUTH) in SEPARATE packets, split by the server's
+    # replies, so no single payload holds the pair. Rejoin each flow's packets
+    # in capture order and re-run the cleartext decoders over the whole
+    # conversation -- the normal case on a real network, which per-packet
+    # decoding alone would miss. Only cleartext kinds are taken from the flow
+    # buffer; the per-packet pass above owns hashes, HTTP, NTLM and Kerberos.
+    # A cred the per-packet pass already found (USER and PASS happened to share
+    # one packet) is not added twice, keyed by kind+candidate+host+username.
+    already = {(it.get("kind"), it.get("candidate"), it.get("host"),
+                it.get("username")) for it in out}
+    for fl in flows.values():
+        if len(fl["parts"]) < 2:
+            continue
+        buf = b"".join(fl["parts"])
+        if buf in seen_blobs:
+            continue
+        seen_blobs.add(buf)
+        for item in candidates_from_payload(buf, source="wire", port=fl["svc"]):
+            if item.get("kind") not in _CLEARTEXT_FLOW_KINDS:
+                continue
+            if fl["host"] and not item.get("host"):
+                item["host"] = fl["host"]
+            if fl["target"] and not item.get("target"):
+                item["target"] = fl["target"]
+            key = (item.get("kind"), item.get("candidate"), item.get("host"),
+                   item.get("username"))
+            if key in already:
+                continue
+            already.add(key)
+            out.append(item)
     return out
 
 
