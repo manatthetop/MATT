@@ -932,6 +932,42 @@ class TestCaptureHelpers(unittest.TestCase):
                                           runner=lambda c, k: fake)
         self.assertEqual(len(result["payloads"]), 2, result["payloads"])
 
+    def test_summary_line_ports_are_parsed(self):
+        self.assertEqual(
+            capture.parse_summary_ports(
+                "12:00:00.1 IP 10.0.0.9.54321 > 10.0.0.5.21: Flags [P.]"),
+            {"src": "10.0.0.9", "sport": 54321, "dst": "10.0.0.5", "dport": 21})
+        v6 = capture.parse_summary_ports(
+            "12:00:00.1 IP6 fe80::1.546 > ff02::1:2.547: UDP")
+        self.assertEqual((v6["sport"], v6["dport"]), (546, 547))
+        self.assertIsNone(capture.parse_summary_ports("tcpdump: 3 packets captured"))
+
+    def test_capture_attaches_ports_so_ftp_and_pop3_are_told_apart(self):
+        """The real win: identical USER/PASS verbs on different ports label
+        correctly end to end, which the verbs alone cannot do."""
+        def pkt(summary, payload):
+            rows = [summary]
+            for i in range(0, len(payload), 16):
+                chunk = payload[i:i + 16]
+                hx = " ".join(chunk[j:j + 2].hex() for j in range(0, len(chunk), 2))
+                rows.append("\t0x%04x:  %s" % (i, hx))
+            return rows
+        out = (pkt("11:11:11.1 IP 10.0.0.9.5001 > 10.0.0.5.21: Flags [P.]",
+                   b"USER alice\r\nPASS s3cret\r\n")
+               + pkt("11:11:12.2 IP 10.0.0.9.5002 > 10.0.0.6.110: Flags [P.]",
+                     b"USER bob\r\nPASS hunter2\r\n"))
+        fake = subprocess.CompletedProcess(["tcpdump"], 0,
+                                           stdout="\n".join(out) + "\n", stderr="")
+        result = capture.capture_payloads("wlan0", duration=0.01,
+                                          capture_tool="tcpdump",
+                                          runner=lambda c, k: fake)
+        self.assertEqual(result["payloads"][0]["dport"], 21)
+        self.assertEqual(result["payloads"][1]["dport"], 110)
+        findings = core.analyze({"payloads": result["payloads"]})["analysis"]["findings"]
+        by_user = {f["username"]: f["kind"] for f in findings}
+        self.assertEqual(by_user["alice"], "ftp")
+        self.assertEqual(by_user["bob"], "pop3")
+
     def test_large_packet_reassembles_and_decodes_a_buried_credential(self):
         """Enterprise grade: a large (jumbo / GRO-coalesced) packet must
         reassemble into ONE payload and a credential buried deep inside it must
@@ -1497,6 +1533,28 @@ class TestCleartextLogins(unittest.TestCase):
         self.assertEqual(pop[0]["kind"], "pop3")
         self.assertEqual(ftp[0]["kind"], "ftp")
 
+    def test_port_tells_ftp_from_pop3_with_no_banner(self):
+        up = b"USER dave\r\nPASS pw\r\n"              # identical verbs, no banner
+        self.assertEqual(core.cleartext_credentials(up, port=21)[0]["kind"], "ftp")
+        self.assertEqual(core.cleartext_credentials(up, port=110)[0]["kind"], "pop3")
+        self.assertEqual(core.cleartext_credentials(up, port=995)[0]["kind"], "pop3")
+        # no port -> unchanged default (back-compat)
+        self.assertEqual(core.cleartext_credentials(up)[0]["kind"], "ftp")
+
+    def test_port_overrides_when_present_and_candidates_threads_it(self):
+        up = b"USER dave\r\nPASS pw\r\n"
+        self.assertEqual(
+            core.candidates_from_payload(up, port=110)[0]["kind"], "pop3")
+        self.assertEqual(
+            core.candidates_from_payload(up, port=21)[0]["kind"], "ftp")
+
+    def test_service_port_resolution_prefers_a_known_port_either_side(self):
+        # a server->client packet carries the service port as the SOURCE port
+        self.assertEqual(core._pick_service_port(54321, 110), 110)
+        self.assertEqual(core._pick_service_port(21, 54321), 21)
+        self.assertEqual(core._pick_service_port(50000, 50001), 50000)
+        self.assertEqual(core.service_protocol(995), "pop3")
+
     def test_snmp_community_string(self):
         comm = b"public"
         snmp = (b"\x30\x19\x02\x01\x01\x04" + bytes([len(comm)]) + comm
@@ -1608,6 +1666,13 @@ class TestIdentifyReverse(unittest.TestCase):
     def test_identify_sha512_by_length(self):
         names = [n for n, _ in core.identify_hash("a" * 128)]
         self.assertIn("SHA-512", names)
+
+    def test_identify_mysql_star_form(self):
+        res = core.identify_hash("*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19")
+        self.assertEqual(len(res), 1)
+        name, mode = res[0]
+        self.assertIn("MySQL", name)
+        self.assertEqual(mode, "300")
 
     def test_identify_kerberos_prefix(self):
         res = core.identify_hash("$krb5tgs$23$*a$b$c*$d$e")

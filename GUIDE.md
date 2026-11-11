@@ -128,7 +128,10 @@ protocols — the kind you meet on a real enterprise LAN:
   (`-m 13100`, with the SPN), and AS-REQ **pre-auth** (`-m 7500`).
 - **HTTP** — form logins, HTTP Basic, and the destination URL.
 - **Cleartext logins** — **FTP**, **POP3**, **IMAP**, **SMTP** (AUTH PLAIN),
-  **LDAP** simple bind, **SNMP** v1/v2c community strings, **telnet**.
+  **LDAP** simple bind, **SNMP** v1/v2c community strings, **telnet**. FTP and
+  POP3 share the same `USER`/`PASS` verbs, so MATT uses the **service port** from
+  the capture (21 vs 110/995) to label each flow correctly, falling back to the
+  server greeting when no port was recorded.
 - **SNMPv3** — the username (recon; the auth params crack with `-m 25100/25200`).
 - **Wi-Fi** — **WPA/WPA2** PMKID (`-m 16800`) and 4-way handshake (`-m 22000`).
 

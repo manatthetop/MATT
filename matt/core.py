@@ -543,6 +543,11 @@ def identify_hash(value) -> list:
     s = s.strip()
     if not s:
         return []
+    # MySQL 4.1+ prints PASSWORD() as '*' + 40 hex (SHA1(SHA1(pw))). hashcat -m
+    # 300 wants the hash without the star, but people paste the stored form, so
+    # recognize it here (the bare 40-hex form is covered by the length table).
+    if re.fullmatch(r"\*[0-9A-Fa-f]{40}", s):
+        return [("MySQL4.1/5+ (SHA1(SHA1))", "300")]
     # Modular-crypt tags are case-sensitive ($P$ phpass vs $p$), so match the
     # original string, not a lower-cased copy.
     for prefixes, name, mode in _IDENT_PREFIXES:
@@ -816,6 +821,37 @@ def kerberos_identity(candidate: str) -> dict:
 # --------------------------------------------------------------------------
 # cleartext logins: FTP/POP3, IMAP, SMTP, LDAP
 # --------------------------------------------------------------------------
+
+# Well-known service port -> protocol label. When a capture records which port
+# a cleartext credential was going to (or coming from), it removes the one real
+# ambiguity in the cleartext decoders: FTP and POP3 both speak USER/PASS, so the
+# verbs alone cannot tell them apart. The port can. Both the TLS/implicit-SSL
+# variants are listed so a credential seen on 995/993/465/636 still labels right.
+_PORT_PROTOCOL = {
+    21: "ftp", 23: "telnet", 25: "smtp", 110: "pop3", 143: "imap",
+    161: "snmp", 389: "ldap", 465: "smtp", 587: "smtp", 636: "ldap",
+    993: "imap", 995: "pop3",
+}
+
+
+def service_protocol(*ports) -> "str | None":
+    """The protocol for the first of ``ports`` that is a known service port, or
+    None. Lets a decoder resolve a flow from whichever side carried the well-known
+    port (a client's dport on a request, a server's sport on a response)."""
+    for p in ports:
+        if p in _PORT_PROTOCOL:
+            return _PORT_PROTOCOL[p]
+    return None
+
+
+def _pick_service_port(dport, sport):
+    """The one of dport/sport that is a recognized service port (either side of
+    the flow may carry it), or dport if neither is, or None."""
+    for p in (dport, sport):
+        if p in _PORT_PROTOCOL:
+            return p
+    return dport if dport is not None else sport
+
 
 # These stop the capture at CR/LF rather than anchoring on $, because a wire
 # line ends in CRLF and the $ (even multiline) sits before the \n, leaving the
@@ -1096,20 +1132,32 @@ def _ldap_simple_bind(raw: bytes):
     return (dn.decode("utf-8", "replace"), pw.decode("utf-8", "replace"))
 
 
-def cleartext_credentials(raw: bytes) -> list:
+def cleartext_credentials(raw: bytes, port=None) -> list:
     """Every cleartext secret in a payload: FTP/POP3 (USER/PASS), IMAP (LOGIN),
     SMTP (AUTH PLAIN), LDAP simple bind, SNMP v1/v2c community strings, and
     line-mode telnet (login:/Password:). Returns a list of dicts
     {kind, username, password} (username is "" for SNMP). These secrets were on
-    the wire in the clear -- MATT reports them as recovered, no cracking."""
+    the wire in the clear -- MATT reports them as recovered, no cracking.
+
+    ``port`` is the service port the flow was on, if the capture recorded it. It
+    disambiguates FTP (21) from POP3 (110/995), which the USER/PASS verbs cannot
+    do on their own; when it is absent the banner heuristic and an ftp default
+    stand in, exactly as before."""
     out = []
 
     u = _USERPASS_USER_RE.search(raw)
     p = _USERPASS_PASS_RE.search(raw)
     if u and p:
-        # FTP and POP3 both use USER/PASS; the greeting tells them apart ("+OK"
-        # is POP3, "220" is FTP). Default to ftp when neither banner is present.
-        kind = "pop3" if (b"+OK" in raw and b"220 " not in raw) else "ftp"
+        # FTP and POP3 both use USER/PASS. The service port settles it when the
+        # capture recorded one; otherwise the greeting tells them apart ("+OK" is
+        # POP3, "220" is FTP); otherwise default to ftp.
+        hinted = service_protocol(port)
+        if hinted in ("ftp", "pop3"):
+            kind = hinted
+        elif b"+OK" in raw and b"220 " not in raw:
+            kind = "pop3"
+        else:
+            kind = "ftp"
         out.append({"kind": kind,
                     "username": u.group(1).decode("latin-1").strip(),
                     "password": p.group(1).decode("latin-1").strip()})
@@ -1189,12 +1237,15 @@ def _http_target(raw: bytes) -> "str | None":
     return host or path or None
 
 
-def candidates_from_payload(payload, source: str = "wire") -> list:
+def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
     """Pull every credential candidate out of one raw payload.
 
     Returns a list of dicts with ``kind``, ``hashcat_mode``, ``candidate``,
     ``decoded_via`` and (when the wire gave us one) ``username`` / ``domain``.
     Deterministic and side-effect free: same bytes in, same list out.
+
+    ``port`` is the service port the payload was on, when the capture recorded
+    one; it is used only to tell FTP from POP3 in the cleartext decoder.
     """
     if isinstance(payload, str):
         raw = _coerce_bytes(payload)
@@ -1298,7 +1349,7 @@ def candidates_from_payload(payload, source: str = "wire") -> list:
     # 5b. cleartext protocol logins (FTP/POP3, IMAP, SMTP, LDAP). The password
     #     was on the wire in the clear -- these are recovered credentials, no
     #     hashcat mode, credential-bearing, and carry the destination.
-    for cred in cleartext_credentials(raw):
+    for cred in cleartext_credentials(raw, port=port):
         u, pw = cred["username"], cred["password"]
         candidate = ("%s:%s" % (u, pw)) if u else pw   # SNMP has no user
         add(cred["kind"], None, candidate, "cleartext",
@@ -1455,9 +1506,14 @@ def extract_candidates(report: dict) -> list:
                 blob = meta.pop("payload", b"")
                 host_here = meta.pop("host", host) or host
                 protocol = meta.pop("protocol", "") or ""
+                # Ports are decode hints, not finding fields: resolve the service
+                # port here and drop them so findings keep their shape.
+                svc_port = _pick_service_port(meta.pop("dport", None),
+                                              meta.pop("sport", None))
             else:
                 blob = entry
                 host_here = host
+                svc_port = None
 
             raw = _coerce_bytes(blob)
             # The same wire bytes may appear under more than one group -- the
@@ -1469,7 +1525,7 @@ def extract_candidates(report: dict) -> list:
             if raw:
                 seen_blobs.add(raw)
             source = "wire" if not protocol else str(protocol)
-            for item in candidates_from_payload(raw, source=source):
+            for item in candidates_from_payload(raw, source=source, port=svc_port):
                 if host_here:
                     item["host"] = host_here
                 if protocol:

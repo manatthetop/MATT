@@ -344,6 +344,31 @@ def hexdump_offset(line: str) -> "int | None":
         return None
 
 
+# tcpdump -nn summary line, e.g.
+#   12:00:00.100000 IP 10.0.0.5.21 > 10.0.0.1.54321: Flags [P.], ...
+#   12:00:00.100000 IP6 fe80::1.546 > ff02::1:2.547: ...
+# The address runs up to the LAST dot before the port, so a greedy address class
+# (hex, ':' and '.') backtracks to leave the trailing ".<port>" -- which works
+# for both IPv4 dotted quads and IPv6 colon addresses. -nn keeps ports numeric.
+_SUMMARY_RE = re.compile(
+    r"\bIP6?\s+([0-9A-Fa-f:.]+)\.(\d+)\s*>\s*([0-9A-Fa-f:.]+)\.(\d+):")
+
+
+def parse_summary_ports(line: str) -> "dict | None":
+    """Pull {src, sport, dst, dport} out of a tcpdump/tshark summary line, or
+    None if the line is not one. Ports are ints. This is what lets the analyzer
+    tell FTP (21) from POP3 (110) on a live capture, where the USER/PASS verbs
+    are identical and only the port differs."""
+    m = _SUMMARY_RE.search(line)
+    if not m:
+        return None
+    try:
+        return {"src": m.group(1), "sport": int(m.group(2)),
+                "dst": m.group(3), "dport": int(m.group(4))}
+    except ValueError:
+        return None
+
+
 def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None,
                      dry_run: bool = False, runner=None, max_packets: int = 0) -> dict:
     """Grab payload bytes for ``duration`` seconds and return raw hex payloads.
@@ -416,25 +441,42 @@ def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None
     # would shred every real credential across payload boundaries and recover
     # none of them. hexdump_row is called with min_bytes=1 so a packet's short
     # final row (e.g. the last 8 bytes) is kept instead of silently dropped.
-    packets: list = []
+    # Each packet is reassembled together with the ports from the summary line
+    # that immediately preceded its hex rows, so the analyzer can disambiguate
+    # same-verb protocols (FTP vs POP3) by port on a live capture.
+    packets: list = []            # list of (hexstr, meta)
     current: list = []
+    current_meta: dict = {}
+    pending_meta: dict = {}
     for line in stdout.splitlines():
         offset = hexdump_offset(line)
         body = hexdump_row(line, min_bytes=1) if offset is not None else None
         if body is None:                       # summary / blank / stats line
             if current:
-                packets.append("".join(current))
+                packets.append(("".join(current), current_meta))
                 current = []
+                current_meta = {}
+            sp = parse_summary_ports(line)
+            if sp:
+                pending_meta = sp              # belongs to the NEXT packet's rows
             continue
         if offset == 0 and current:            # a new packet started
-            packets.append("".join(current))
+            packets.append(("".join(current), current_meta))
             current = []
+            current_meta = {}
+        if not current:                        # first row of a new packet
+            current_meta = pending_meta
+            pending_meta = {}
         current.append(body)
     if current:
-        packets.append("".join(current))
-    for packet in packets:
+        packets.append(("".join(current), current_meta))
+    for packet, meta in packets:
         if packet:
-            result["payloads"].append({"payload": packet, "protocol": "raw"})
+            entry = {"payload": packet, "protocol": "raw"}
+            if meta:
+                entry["sport"] = meta.get("sport")
+                entry["dport"] = meta.get("dport")
+            result["payloads"].append(entry)
 
     if proc.returncode not in (0, None) and not result["payloads"]:
         result["note"] = capture_note(proc.returncode)
