@@ -1860,6 +1860,89 @@ class TestArp(unittest.TestCase):
         self.assertIsNone(core.arp_info(b"\x00\x01\x08\x00\x06\x04short"))
 
 
+class TestKnownDiscoveryProtocols(unittest.TestCase):
+    """A handful of common LAN broadcast protocols carry no secret at all --
+    there is nothing for hashcat, or any other method, to crack -- but they
+    were landing in the generic "does not match any hashcat format, kept
+    verbatim for manual review" catch-all, which reads as suspicious for
+    traffic this mundane. These are labeled by their own signature instead."""
+
+    def test_dropbox_lansync_labeled(self):
+        pkt = b'{"version":[2,0],"port":17500,"host_int":1,"namespaces":[]}'
+        self.assertEqual(core.known_discovery_protocol(pkt), "dropbox-lansync")
+        f = core.candidates_from_payload(pkt, port=17500)[0]
+        self.assertEqual(f["kind"], "dropbox-lansync")
+        self.assertFalse(f["credential_bearing"])
+        prose = core.stage2_prose(f)
+        self.assertIn("Dropbox LAN-sync", prose)
+        self.assertIn("nothing to crack", prose)
+
+    def test_bsdp_labeled(self):
+        pkt = b"SEARCH BSDP/0.1\nDEVICE=0\nSERVICE=1\n"
+        self.assertEqual(core.known_discovery_protocol(pkt), "bsdp")
+        f = core.candidates_from_payload(pkt)[0]
+        self.assertEqual(f["kind"], "bsdp")
+        self.assertIn("BSDP", core.stage2_prose(f))
+
+    def test_spotify_connect_labeled(self):
+        pkt = b"SpotUdp0" + b"\xde\xaf" * 10
+        self.assertEqual(core.known_discovery_protocol(pkt), "spotify-connect")
+        f = core.candidates_from_payload(pkt)[0]
+        self.assertEqual(f["kind"], "spotify-connect")
+        self.assertIn("Spotify Connect", core.stage2_prose(f))
+
+    def test_hasp_license_manager_labeled_by_port(self):
+        pkt = b"204tn4TKHX6eSdvi6jo3ULNqIa21rGoJamHgfpcA"
+        self.assertEqual(core.known_discovery_protocol(pkt, port=1947), "hasp-lm")
+        self.assertIsNone(core.known_discovery_protocol(pkt, port=None))
+        f = core.candidates_from_payload(pkt, port=1947)[0]
+        self.assertEqual(f["kind"], "hasp-lm")
+        self.assertIn("HASP", core.stage2_prose(f))
+
+    def test_unrelated_text_not_mislabeled(self):
+        self.assertIsNone(core.known_discovery_protocol(b"USER alice\r\n"))
+
+
+class TestCredentialDestination(unittest.TestCase):
+    """A capture's own src/dst IPs (from the tcpdump/tshark summary line) are
+    the fallback for "whose traffic was this" and "where did it go" -- so a
+    credential's prose names an actual destination instead of the generic
+    "the wire" placeholder, and never says a cred went "over raw" (tcpdump's
+    own hexdump framing leaking into a sentence about the application
+    protocol)."""
+
+    def test_ftp_credential_names_its_source_and_destination(self):
+        report = {"payloads": [
+            {"payload": b"USER alice\r\nPASS Sup3rSecret!\r\n".hex(),
+             "sport": 51622, "dport": 21,
+             "src": "10.20.5.22", "dst": "10.20.4.9"},
+        ]}
+        findings = core.analyze(report)["analysis"]["findings"]
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["host"], "10.20.5.22")
+        self.assertEqual(f["target"], "10.20.4.9:21")
+        self.assertEqual(f["protocol"], "ftp")
+        self.assertIn("10.20.5.22", f["prose"])
+        self.assertIn("10.20.4.9:21", f["prose"])
+        self.assertNotIn("raw", f["prose"])
+
+    def test_decoder_target_outranks_capture_dst(self):
+        """An HTTP Host header is the application's own idea of its
+        destination and must win over the capture's dst IP, which is just
+        wherever that TCP connection happened to land (a reverse proxy, a
+        load balancer -- not necessarily the name the client asked for)."""
+        pkt = (b"GET /login HTTP/1.1\r\nHost: intranet.corp.local\r\n"
+              b"Authorization: Basic YWxpY2U6c2VjcmV0\r\n\r\n")
+        report = {"payloads": [
+            {"payload": pkt.hex(), "sport": 51000, "dport": 80,
+             "src": "10.0.0.5", "dst": "10.0.0.1"},
+        ]}
+        findings = core.analyze(report)["analysis"]["findings"]
+        basic = [f for f in findings if f["kind"] == "http-basic"][0]
+        self.assertEqual(basic["target"], "intranet.corp.local/login")
+
+
 class TestWifiHandshake(unittest.TestCase):
     def test_command_builders(self):
         from matt import wifi

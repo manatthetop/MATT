@@ -1073,6 +1073,38 @@ def arp_info(raw: bytes):
             "target_mac": tmac, "target_ip": tip}
 
 
+_DISCOVERY_LABELS = {
+    "dropbox-lansync": "Dropbox LAN-sync discovery broadcast",
+    "bsdp": "Apple BSDP (NetBoot) discovery request",
+    "spotify-connect": "Spotify Connect discovery broadcast",
+    "hasp-lm": "Sentinel HASP / FlexLM license-manager discovery broadcast",
+}
+
+
+def known_discovery_protocol(raw: bytes, port=None) -> "str | None":
+    """A kind slug for a handful of common, no-secret LAN discovery/broadcast
+    protocols, recognized by their own signature (and, for HASP, its port --
+    its payload is an opaque session token with no signature of its own), or
+    None.
+
+    None of these carry a credential: there is nothing here for hashcat, or
+    any other method, to crack -- the right outcome is naming the protocol,
+    not forcing it through a cracker that has nothing to crack. Without this,
+    all four fell into the generic "does not match any hashcat format, kept
+    verbatim for manual review" catch-all, which reads as suspicious for
+    traffic this mundane.
+    """
+    if raw.startswith(b'{"version"') and b'"namespaces"' in raw[:260]:
+        return "dropbox-lansync"
+    if raw.startswith(b"SEARCH BSDP/"):
+        return "bsdp"
+    if raw.startswith(b"SpotUdp"):
+        return "spotify-connect"
+    if port == 1947:
+        return "hasp-lm"
+    return None
+
+
 def _usm_username(seq: bytes):
     """The msgUserName (4th field) out of an SNMPv3 USM SEQUENCE: OCTET engineID,
     INTEGER boots, INTEGER time, OCTET userName, ..."""
@@ -1329,7 +1361,7 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
         if not user or not secret:
             continue
         add("http-basic", None, f"{user}:{secret}", "base64+utf-8",
-            username=user, credential_bearing=True, **dest)
+            username=user, credential_bearing=True, protocol="http", **dest)
 
     # 3. NetNTLM v1 triplets sitting in the clear (LM:NT:SERVERCHALLENGE).
     for match in _BARE_NTLM_RE.finditer(raw):
@@ -1379,7 +1411,7 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
         u, pw = cred["username"], cred["password"]
         candidate = ("%s:%s" % (u, pw)) if u else pw   # SNMP has no user
         add(cred["kind"], None, candidate, "cleartext",
-            username=u, credential_bearing=True, **dest)
+            username=u, credential_bearing=True, protocol=cred["kind"], **dest)
 
     # 5c. Kerberos roast lines ($krb5asrep$ / $krb5tgs$) off a roaster's output.
     #     The account (and the SPN, for TGS) ride in the clear in the hash, so
@@ -1433,6 +1465,16 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
                       if arp["op"] == "request" else
                       f"{arp['sender_ip']} is-at {arp['sender_mac']}")
             add("arp", None, summary, "arp", credential_bearing=False, **arp)
+
+    # 5g. a handful of common, no-secret LAN discovery/broadcast protocols:
+    #     labeled by their own signature so they read as what they are,
+    #     instead of landing in the generic "raw" catch-all below.
+    if not found:
+        disc_kind = known_discovery_protocol(raw, port)
+        if disc_kind:
+            method, text = decode_field(raw)
+            add(disc_kind, None, text, method, credential_bearing=False,
+                protocol=disc_kind, discovery_label=_DISCOVERY_LABELS[disc_kind])
 
     # 6. nothing structured: keep the payload itself so a human can look at it.
     if not found and raw:
@@ -1541,7 +1583,18 @@ def extract_candidates(report: dict) -> list:
                     continue
                 meta = dict(entry)
                 blob = meta.pop("payload", b"")
-                host_here = meta.pop("host", host) or host
+                # src/dst are IPs off the capture's own summary line (tcpdump/
+                # tshark), independent of anything the credential decoders find
+                # in the payload bytes. They are the fallback for "whose
+                # traffic was this" and "where did it go" -- a decoder-derived
+                # host/target (an HTTP Host header, an NTLMv2 target server,
+                # a TLS SNI) always wins when one exists, since that is the
+                # application's own idea of its destination, not just the IP
+                # a layer 3 header happened to carry.
+                src_ip = meta.pop("src", None)
+                dst_ip = meta.pop("dst", None)
+                dport_val = meta.get("dport")
+                host_here = meta.pop("host", host) or host or src_ip
                 protocol = meta.pop("protocol", "") or ""
                 # Ports are decode hints, not finding fields: resolve the service
                 # port here and drop them so findings keep their shape.
@@ -1551,6 +1604,7 @@ def extract_candidates(report: dict) -> list:
                 blob = entry
                 host_here = host
                 svc_port = None
+                src_ip = dst_ip = dport_val = None
 
             raw = _coerce_bytes(blob)
             # The same wire bytes may appear under more than one group -- the
@@ -1565,8 +1619,10 @@ def extract_candidates(report: dict) -> list:
             for item in candidates_from_payload(raw, source=source, port=svc_port):
                 if host_here:
                     item["host"] = host_here
-                if protocol:
+                if protocol and not item.get("protocol"):
                     item["protocol"] = protocol
+                if dst_ip and not item.get("target"):
+                    item["target"] = f"{dst_ip}:{dport_val}" if dport_val else dst_ip
                 item.update({k: v for k, v in meta.items() if k not in item})
                 out.append(item)
     return out
@@ -1638,6 +1694,13 @@ def stage2_prose(finding: dict) -> str:
         return (f"{host} presented a TLS certificate for {candidate}, issued by "
                 f"{issuer!r}{tail}. Read from the ServerHello in the clear; the "
                 "session payload stays encrypted.")
+
+    if finding.get("discovery_label"):
+        shown = candidate if (candidate and not candidate.startswith("hex:")) else None
+        tail = f" Decoded: {shown}" if shown else ""
+        dest = f" to {where}" if target else " on the LAN"
+        return (f"{host} sent a {finding['discovery_label']}{dest}; not a "
+                f"credential, nothing to crack.{tail}")
 
     if kind == "arp":
         if finding.get("op") == "request":

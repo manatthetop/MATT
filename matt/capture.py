@@ -554,10 +554,17 @@ def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None
             stripped = packet
         if not stripped:   # a header-only frame (bare ACK, etc): no app data
             continue
-        entry = {"payload": stripped, "protocol": "raw"}
+        # No "protocol" key here: tcpdump/tshark never told us the application
+        # protocol, only bytes on a wire, so stamping one on (e.g. "raw") would
+        # outrank -- and silently clobber -- whatever a credential decoder
+        # itself works out (an FTP login, a TLS ALPN tag). Leave it unset and
+        # let the decoder's own, more specific answer carry the finding.
+        entry = {"payload": stripped}
         if meta:
             entry["sport"] = meta.get("sport")
             entry["dport"] = meta.get("dport")
+            entry["src"] = meta.get("src")
+            entry["dst"] = meta.get("dst")
         result["payloads"].append(entry)
 
     if proc.returncode not in (0, None) and not result["payloads"]:
