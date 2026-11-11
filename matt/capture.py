@@ -177,6 +177,31 @@ def discover_clients(neigh: str = None) -> list:
     return clients
 
 
+def neighbor_table(neigh: str = None) -> dict:
+    """An {ip: mac} map from `ip neigh`, for naming captured hosts by their MAC
+    vendor at analysis time. Best-effort: entries without a lladdr are skipped.
+    Snapshotting this at capture time keeps the analyze step offline and pure."""
+    if neigh is None:
+        if not shutil.which("ip"):
+            return {}
+        try:
+            proc = subprocess.run(["ip", "neigh"], capture_output=True,
+                                  text=True, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        neigh = proc.stdout
+    table: dict = {}
+    for line in neigh.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or "lladdr" not in parts:
+            continue
+        ip = parts[0]
+        mac = parts[parts.index("lladdr") + 1]
+        if ip and mac:
+            table[ip] = mac
+    return table
+
+
 # --------------------------------------------------------------------------
 # daemons
 # --------------------------------------------------------------------------
@@ -583,7 +608,8 @@ def build_report(iface: str = None, payloads: list = None, hosts: dict = None,
                  gateway: str = None, clients: list = None, capture: dict = None,
                  poison: dict = None, duration: float = None,
                  tool_versions: dict = None, started: str = None,
-                 finished: str = None, mode: str = "live") -> dict:
+                 finished: str = None, mode: str = "live",
+                 neighbors: dict = None) -> dict:
     """Assemble the stage-1 capture_report dict. Pure: no I/O, no clock calls
     beyond the timestamps handed in by the caller."""
     return {
@@ -596,6 +622,7 @@ def build_report(iface: str = None, payloads: list = None, hosts: dict = None,
         "duration_seconds": duration,
         "gateway": gateway,
         "clients": list(clients or []),
+        "neighbors": dict(neighbors or {}),
         "poison": poison or {},
         "capture": capture or {},
         "payloads": list(payloads or []),

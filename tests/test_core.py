@@ -2280,6 +2280,50 @@ class TestDashboard(unittest.TestCase):
 # 17. TLS certificate names + LLMNR/NBT-NS poisoning
 # --------------------------------------------------------------------------
 
+class TestDeviceNames(unittest.TestCase):
+    def test_vendor_for_mac_known_and_randomized(self):
+        self.assertEqual(core.vendor_for_mac("A4:38:CC:4B:67:F4"), "Nintendo")
+        self.assertEqual(core.vendor_for_mac("0ce5a30e5848"), "SharkNinja")
+        self.assertEqual(core.vendor_for_mac("74:24:9F:BD:DE:3C"), "Starlink")
+        # a locally-administered / randomized MAC names no real vendor
+        self.assertIsNone(core.vendor_for_mac("16:13:52:62:5B:82"))
+        self.assertIsNone(core.vendor_for_mac("DE:AD:BE:EF:00:01"))
+        self.assertIsNone(core.vendor_for_mac(""))
+
+    def test_dhcp_hostname_option_12(self):
+        name = b"kitchen-ipad"
+        pkt = (b"\x00" * 236 + bytes.fromhex("63825363") + b"\x35\x01\x03"
+               + bytes([12, len(name)]) + name + b"\xff")
+        self.assertEqual(core.dhcp_hostname(pkt), "kitchen-ipad")
+        self.assertIsNone(core.dhcp_hostname(b"no magic cookie here"))
+
+    def test_findings_get_a_device_label_from_the_neighbor_table(self):
+        report = {
+            "payloads": [{"payload": (b"USER bob\r\nPASS pw\r\n").hex(),
+                          "protocol": "raw", "src": "10.0.0.9", "dst": "10.0.0.5",
+                          "sport": 5000, "dport": 21}],
+            "neighbors": {"10.0.0.9": "A4:38:CC:4B:67:F4"}}
+        f = [x for x in core.analyze(report)["analysis"]["findings"]
+             if x["kind"] == "ftp"][0]
+        self.assertEqual(f["host"], "10.0.0.9")
+        self.assertEqual(f["device"], "Nintendo")
+
+    def test_wire_announced_name_beats_mac_vendor(self):
+        name = b"printer-hr"
+        dhcp = (b"\x00" * 236 + bytes.fromhex("63825363")
+                + bytes([12, len(name)]) + name + b"\xff")
+        report = {
+            "payloads": [
+                {"payload": dhcp.hex(), "protocol": "raw", "src": "10.0.0.9",
+                 "dst": "10.0.0.255", "sport": 68, "dport": 67},
+                {"payload": (b"USER bob\r\nPASS pw\r\n").hex(), "protocol": "raw",
+                 "src": "10.0.0.9", "dst": "10.0.0.5", "sport": 5001, "dport": 21}],
+            "neighbors": {"10.0.0.9": "A4:38:CC:4B:67:F4"}}
+        f = [x for x in core.analyze(report)["analysis"]["findings"]
+             if x["kind"] == "ftp"][0]
+        self.assertEqual(f["device"], "printer-hr")   # DHCP name wins over vendor
+
+
 class TestTlsCert(unittest.TestCase):
     def test_subject_issuer_and_sans(self):
         def strtlv(s):

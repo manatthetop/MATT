@@ -46,8 +46,11 @@ def collect_findings(root: str) -> dict:
             if key in seen:
                 continue
             seen.add(key)
+            _host = f.get("host") or "the wire"
+            _dev = f.get("device")
             rows.append({
-                "host": f.get("host") or "the wire",
+                "host": ("%s (%s)" % (_dev, _host)) if _dev and _dev not in _host
+                        else _host,
                 "target": f.get("target") or "",
                 "user": f.get("username") or "",
                 "type": f.get("kind") or "",

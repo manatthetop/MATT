@@ -836,6 +836,173 @@ _PORT_PROTOCOL = {
     993: "imap", 995: "pop3",
 }
 
+
+# --------------------------------------------------------------------------
+# device identity: who a host IS, not just its IP. A credential that reads
+# "jdoe -> FILESERVER01" is sharper still when the host is "Nintendo Switch"
+# or "iPhone-Kitchen" instead of 192.168.1.253. Names come from the wire
+# (DHCP option 12, NetBIOS, mDNS) and the MAC vendor (OUI) captured alongside.
+# --------------------------------------------------------------------------
+
+# A curated MAC OUI -> vendor map (prefix is the first 3 bytes, upper, no
+# separators). Deliberately small: the common consumer / IoT / network vendors,
+# so a home or office device gets a readable label with zero dependencies and no
+# multi-megabyte OUI database. Unknown prefixes just fall back to the IP.
+OUI_VENDORS = {
+    "74249F": "Starlink", "F80FF9": "Starlink", "F8B51E": "Starlink",
+    "0CE5A3": "SharkNinja", "A438CC": "Nintendo", "A436C7": "LG",
+    "AC675D": "Intel",
+    # Apple
+    "F0D1A9": "Apple", "A4C361": "Apple", "DCA904": "Apple", "3C0754": "Apple",
+    "F0DBF8": "Apple", "A85C2C": "Apple", "8866A5": "Apple", "ACDE48": "Apple",
+    "F82793": "Apple", "C82A14": "Apple", "D0817A": "Apple", "9C207B": "Apple",
+    # Samsung
+    "F008F1": "Samsung", "5CF5DA": "Samsung", "8CF5A3": "Samsung",
+    "C44202": "Samsung", "E8508B": "Samsung", "D0176A": "Samsung",
+    # Google / Nest
+    "F4F5D8": "Google", "F4F5E8": "Google", "A47733": "Google",
+    "1CF29A": "Google", "D8EB46": "Google", "3C286D": "Google",
+    # Amazon / Echo / Ring
+    "FCA183": "Amazon", "F0272D": "Amazon", "44650D": "Amazon",
+    "68544C": "Amazon", "0C47C9": "Amazon", "B47C9C": "Amazon",
+    # Microsoft / Xbox
+    "7C1E52": "Microsoft", "C83F26": "Microsoft", "000D3A": "Microsoft",
+    # Raspberry Pi
+    "DCA632": "Raspberry Pi", "E45F01": "Raspberry Pi", "B827EB": "Raspberry Pi",
+    "2CCF67": "Raspberry Pi",
+    # Routers / network gear
+    "001018": "Broadcom", "000C43": "Ralink", "001374": "Atheros",
+    "0018E7": "Cameo", "F4EC38": "TP-Link", "5C628B": "TP-Link",
+    "50C7BF": "TP-Link", "E894F6": "TP-Link", "001F3F": "Netgear",
+    "A040A0": "Netgear", "20E52A": "Netgear", "001E2A": "Netgear",
+    "000FB5": "Netgear", "00146C": "Netgear", "2CB05D": "Netgear",
+    "B0487A": "TP-Link", "D8074": "ASUS", "04D4C4": "ASUS", "AC220B": "ASUS",
+    "001F33": "Netgear", "0009B0": "Onkyo", "001A11": "Google",
+    "60A4B7": "eero", "F89018": "eero", "B07FB9": "Netgear",
+    # Roku / Sonos / smart TV / IoT
+    "DC3A5E": "Roku", "CCF4A7": "Roku", "B83E59": "Roku", "AC3A7A": "Roku",
+    "5CAAFD": "Sonos", "949F3E": "Sonos", "B8E937": "Sonos",
+    "D052A8": "Physical Graph", "18B430": "Nest", "64167F": "Polycom",
+    "ECFABC": "Espressif", "A020A6": "Espressif", "246F28": "Espressif",
+    "7C9EBD": "Espressif", "8CAAB5": "Espressif", "A4CF12": "Espressif",
+    "B4E62D": "Espressif", "246CA1": "Ubiquiti", "FCECDA": "Ubiquiti",
+    "7483C2": "Ubiquiti", "802AA8": "Ubiquiti", "68D79A": "Ubiquiti",
+    "44D9E7": "Ubiquiti", "E063DA": "Ubiquiti", "0418D6": "Ubiquiti",
+}
+
+
+def vendor_for_mac(mac) -> "str | None":
+    """The hardware vendor for a MAC address, via its OUI prefix. None if the
+    prefix is not in the curated table, or the MAC is locally administered
+    (randomized) -- a randomized MAC names no real vendor, so MATT does not
+    guess one. ``mac`` may use any common separator or none."""
+    if not mac:
+        return None
+    hexmac = re.sub(r"[^0-9A-Fa-f]", "", str(mac)).upper()
+    if len(hexmac) < 6:
+        return None
+    # locally administered / randomized (2nd-least-significant bit of byte 1)
+    try:
+        if int(hexmac[:2], 16) & 0x02:
+            return None
+    except ValueError:
+        return None
+    return OUI_VENDORS.get(hexmac[:6])
+
+
+_DHCP_MAGIC = bytes.fromhex("63825363")
+
+
+def dhcp_hostname(raw: bytes) -> "str | None":
+    """The host name a device announces in a DHCP request (option 12), or None.
+    Found by locating the BOOTP magic cookie and walking the option TLVs, so it
+    works whether or not the payload still carries its UDP/IP headers."""
+    i = raw.find(_DHCP_MAGIC)
+    if i < 0:
+        return None
+    j = i + 4
+    n = len(raw)
+    while j < n:
+        opt = raw[j]
+        if opt == 0xFF:            # END
+            break
+        if opt == 0x00:            # PAD
+            j += 1
+            continue
+        if j + 1 >= n:
+            break
+        ln = raw[j + 1]
+        val = raw[j + 2:j + 2 + ln]
+        if opt == 12 and val:      # Host Name
+            try:
+                name = val.decode("latin-1").strip().strip("\x00")
+            except Exception:
+                return None
+            return name or None
+        j += 2 + ln
+    return None
+
+
+def _nbns_decode(enc: bytes) -> "str | None":
+    """Decode a first-level-encoded NetBIOS name (32 bytes -> 16). Each byte is
+    split into two nibbles, each added to 'A'. Trailing padding/0x00 trimmed."""
+    if len(enc) < 32:
+        return None
+    out = bytearray()
+    for k in range(0, 32, 2):
+        hi = enc[k] - 0x41
+        lo = enc[k + 1] - 0x41
+        if not (0 <= hi <= 15 and 0 <= lo <= 15):
+            return None
+        out.append((hi << 4) | lo)
+    name = bytes(out[:15]).rstrip(b"\x00\x20").decode("latin-1", "ignore").strip()
+    return "".join(ch for ch in name if 32 <= ord(ch) < 127) or None
+
+
+def nbns_name(raw: bytes) -> "str | None":
+    """The NetBIOS computer name from an NBNS (UDP 137) registration/query, or
+    None. The name sits after the 12-byte NBNS header as a length-0x20 label."""
+    i = raw.find(b"\x20", 12)
+    while 0 <= i < len(raw) - 32:
+        if raw[i] == 0x20:
+            name = _nbns_decode(raw[i + 1:i + 33])
+            if name and name not in ("", "*"):
+                return name
+        i = raw.find(b"\x20", i + 1)
+    return None
+
+
+def device_names_from_payloads(payloads) -> dict:
+    """Build an {ip: device-name} map from a capture's payloads, reading the
+    names devices put on the wire themselves -- DHCP option 12 and NetBIOS. The
+    source IP of the announcing packet is the device it names."""
+    names: dict = {}
+    for p in payloads or []:
+        if not isinstance(p, dict):
+            continue
+        src = p.get("src")
+        if not src or src in names or src in ("0.0.0.0", "::"):
+            continue
+        try:
+            raw = _coerce_bytes(p.get("payload", b""))
+        except Exception:
+            continue
+        name = dhcp_hostname(raw) or nbns_name(raw)
+        if name:
+            names[src] = name
+    return names
+
+
+def device_label(ip, names=None, neighbors=None) -> "str | None":
+    """The friendliest identity for a host: a name it announced on the wire
+    (DHCP/NetBIOS) if known, else its MAC vendor (via the neighbor table), else
+    None. Never invents an identity for a randomized MAC."""
+    if names and ip in names:
+        return names[ip]
+    if neighbors and ip in neighbors:
+        return vendor_for_mac(neighbors.get(ip))
+    return None
+
 # Cleartext protocols whose credentials routinely span several packets, so they
 # are recovered from a reassembled flow buffer (not just a single payload).
 _CLEARTEXT_FLOW_KINDS = {"ftp", "pop3", "imap", "smtp", "ldap", "snmp", "telnet"}
@@ -1690,6 +1857,20 @@ def extract_candidates(report: dict) -> list:
                 continue
             already.add(key)
             out.append(item)
+
+    # Device identity: label each finding's host with the device it belongs to
+    # -- a name it announced on the wire (DHCP/NetBIOS) or its MAC vendor from
+    # the capture's neighbor snapshot -- so a hash reads "Nintendo (10.0.0.9)"
+    # rather than a bare IP. Added as a separate field; host itself is untouched.
+    names = device_names_from_payloads(report.get("payloads"))
+    neighbors = report.get("neighbors") if isinstance(report.get("neighbors"), dict) else {}
+    if names or neighbors:
+        for item in out:
+            host = item.get("host")
+            if host and not item.get("device"):
+                label = device_label(host, names=names, neighbors=neighbors)
+                if label:
+                    item["device"] = label
     return out
 
 

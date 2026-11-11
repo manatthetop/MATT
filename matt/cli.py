@@ -630,17 +630,28 @@ def _cell(text, width, style=None):
     return _c(s, *style) if style else s
 
 
+def _host_label(f) -> str:
+    """How a finding's source host is shown: the device name next to its IP when
+    MATT identified the device (e.g. "Nintendo (10.0.0.9)"), else the host/IP, or
+    "the wire" when there is no host at all."""
+    host = f.get("host") or "the wire"
+    device = f.get("device")
+    if device and device not in host:
+        return "%s (%s)" % (device, host)
+    return host
+
+
 def _print_table(findings) -> None:
-    """One row per credential: host, target, user, type, secret/cracked, colour
-    coded by category. Only actual credentials/recon are listed."""
+    """One row per credential: device/host, target, user, type, secret/cracked,
+    colour coded by category. Only actual credentials/recon are listed."""
     creds = [f for f in findings
              if f.get("credential_bearing") or f.get("hashcat_mode")
              or f.get("kind") in _RECON_KINDS]
-    headers = ("HOST", "TARGET", "USER", "TYPE", "SECRET / CRACKED")
-    rows = [(f.get("host") or "the wire", f.get("target") or "-",
+    headers = ("DEVICE / HOST", "TARGET", "USER", "TYPE", "SECRET / CRACKED")
+    rows = [(_host_label(f), f.get("target") or "-",
              f.get("username") or "-", f.get("kind") or "-", _finding_secret(f))
             for f in creds]
-    caps = (24, 30, 18, 11, 28)
+    caps = (28, 28, 18, 11, 26)
     widths = [min(cap, max(len(headers[i]), *(len(str(r[i])) for r in rows)) if rows
                   else len(headers[i])) for i, cap in enumerate(caps)]
     print("  " + "  ".join(_c(_clip(h, w).ljust(w), "bold")
@@ -662,7 +673,7 @@ def _print_findings(findings) -> None:
     """One block per credential: a coloured 'source -> destination' header so
     that, in a report with several, each one's target is unmistakable."""
     for f in findings:
-        host = f.get("host") or "the wire"
+        host = _host_label(f)
         target = f.get("target")
         kind = f.get("kind") or ""
         label = f"{host}  ->  {target}" if target else host
@@ -829,6 +840,7 @@ def run_live(args, parser) -> int:
         return EXIT_LIVE
 
     clients = _capture.discover_clients()
+    neighbors = _capture.neighbor_table()   # ip -> mac, for device-name labelling
     poison = {"skipped": True, "reason": "--no-poison"}
     pid = None
     if not args.no_poison:
@@ -861,7 +873,8 @@ def run_live(args, parser) -> int:
 
     report = _capture.build_report(
         iface=args.iface, payloads=payloads, hosts=hosts, gateway=gateway,
-        clients=clients, capture={k: v for k, v in sniff.items() if k != "payloads"},
+        clients=clients, neighbors=neighbors,
+        capture={k: v for k, v in sniff.items() if k != "payloads"},
         poison=poison, duration=round(time.monotonic() - t0, 3),
         tool_versions=versions, started=started, finished=_core.utc_now(),
         mode="live")

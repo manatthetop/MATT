@@ -8,7 +8,7 @@
 ![CI](https://github.com/manatthetop/MATT/actions/workflows/ci.yml/badge.svg)
 ![Release](https://img.shields.io/github/v/release/manatthetop/MATT)
 ![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)
-![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-221%20passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-success)
 
 **MATT** is a two-stage **credential-recovery toolkit** for *authorized* wireless
