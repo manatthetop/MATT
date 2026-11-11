@@ -87,10 +87,45 @@ def crack(findings, wordlist=DEFAULT_WORDLIST, hashcat="hashcat", runner=None,
     """
     runner = runner or _default_runner
     items = crackable(findings)
+    owns_tmp = tmpdir is None
     tmp = tmpdir or tempfile.mkdtemp(prefix="matt-crack-")
     recovered: dict = {}
     notes: dict = {}
 
+    try:
+        _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
+                    recovered, notes)
+    finally:
+        # Only remove a directory we made ourselves: a caller-supplied tmpdir
+        # (tests inject one to inspect the hash/outfiles afterward) is theirs
+        # to clean up, not ours. Without this, a long session running --crack
+        # repeatedly (the menu's "crack a capture" option, or --watch --crack
+        # on a directory of incoming reports) leaves one abandoned
+        # "matt-crack-*" directory under /tmp per run, forever.
+        if owns_tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    results = []
+    for f in items:
+        cand = f["candidate"]
+        results.append({
+            "host": f.get("host"),
+            "username": f.get("username"),
+            "target": f.get("target"),
+            "kind": f.get("kind"),
+            "mode": str(f.get("hashcat_mode")),
+            "candidate": cand,
+            "plaintext": recovered.get(cand.lower()),
+            "note": notes.get(cand.lower()),
+        })
+    return results
+
+
+def _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
+                recovered, notes) -> None:
+    """The actual hashcat-running loop, factored out of crack() so the
+    tmpdir-cleanup in its caller is a single try/finally around one call,
+    not duplicated around every early return this loop used to have."""
     for mode, group in group_by_mode(items).items():
         hashfile = os.path.join(tmp, "hashes_%s.txt" % mode)
         outfile = os.path.join(tmp, "cracked_%s.txt" % mode)
@@ -124,18 +159,3 @@ def crack(findings, wordlist=DEFAULT_WORDLIST, hashcat="hashcat", runner=None,
                 recovered.update(parse_outfile(fh.read()))
         except OSError:
             pass
-
-    results = []
-    for f in items:
-        cand = f["candidate"]
-        results.append({
-            "host": f.get("host"),
-            "username": f.get("username"),
-            "target": f.get("target"),
-            "kind": f.get("kind"),
-            "mode": str(f.get("hashcat_mode")),
-            "candidate": cand,
-            "plaintext": recovered.get(cand.lower()),
-            "note": notes.get(cand.lower()),
-        })
-    return results

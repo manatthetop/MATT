@@ -17,12 +17,14 @@ import ast
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1545,6 +1547,51 @@ class TestCrack(unittest.TestCase):
         results = crack.crack(self._findings(), wordlist="/dev/null", runner=boom)
         self.assertTrue(all(r["plaintext"] is None for r in results))
         self.assertTrue(any(r["note"] for r in results))
+
+    def test_crack_cleans_up_its_own_tmpdir(self):
+        """Every --crack run (and the interactive menu's "crack a capture"
+        option, and --watch --crack polling a directory of incoming reports)
+        called tempfile.mkdtemp() and never removed it -- a session doing
+        that repeatedly leaves one abandoned "matt-crack-*" directory under
+        /tmp per run, forever. crack() must remove a tmpdir it created
+        itself..."""
+        from matt import crack
+
+        created = []
+
+        def fake_runner(cmd, timeout):
+            return None
+
+        real_mkdtemp = tempfile.mkdtemp
+
+        def spy_mkdtemp(*a, **k):
+            d = real_mkdtemp(*a, **k)
+            created.append(d)
+            return d
+
+        with unittest.mock.patch("matt.crack.tempfile.mkdtemp", spy_mkdtemp):
+            crack.crack(self._findings(), wordlist="/dev/null", runner=fake_runner)
+        self.assertEqual(len(created), 1)
+        self.assertFalse(os.path.exists(created[0]),
+                         "crack() must remove the tmpdir it created itself")
+
+    def test_crack_leaves_a_caller_supplied_tmpdir_alone(self):
+        """...but not one the caller handed in: tests (and any future caller
+        that wants to inspect the hash/outfiles afterward) own that
+        directory, and must get it back exactly as they left it."""
+        from matt import crack
+
+        def fake_runner(cmd, timeout):
+            return None
+
+        d = tempfile.mkdtemp(prefix="matt-crack-caller-owned-")
+        try:
+            crack.crack(self._findings(), wordlist="/dev/null", runner=fake_runner,
+                       tmpdir=d)
+            self.assertTrue(os.path.exists(d))
+            self.assertTrue(os.listdir(d), "hashcat's input files should be in here")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
