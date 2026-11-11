@@ -167,7 +167,14 @@ All are gated on root + `--i-have-written-authorization`, local segment only:
   fallbacks so a victim's auth is funnelled to you (a **Responder**-style
   primitive) for the NetNTLMv2 decoder.
 - **WPA handshake capture** (`--wpa`) — monitor mode, channel-locked capture, a
-  **deauth** to force a reconnect, converted to hashcat 22000.
+  **deauth** to force a reconnect, converted to hashcat 22000. **Auto-configuring:**
+  give it `--ssid NAME` (or `--bssid`) and MATT scans, finds the AP's **channel**
+  and BSSID itself, sets the adapter to monitor mode in place with `iw` (works on
+  the in-kernel USB drivers like rtw89 where airmon-ng's `*mon` interface is never
+  created), captures, then restores managed mode. It is also menu option **5** —
+  pick a network from a live scan and MATT does the rest. The captured
+  `matt-wpa.22000` can be fed straight back in: `matt --analyze-only matt-wpa.22000
+  --crack` (a plain hash file is accepted, not just a JSON report).
 
 ## 11. Enterprise-grade testing
 

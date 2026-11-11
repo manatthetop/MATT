@@ -167,7 +167,8 @@ _MENU = [
     ("2", "Live passive capture", "sniff an interface only -- needs root"),
     ("3", "Live MITM capture", "ARP-poison + sniff -- needs root + authorization"),
     ("4", "Crack a capture with hashcat", "recover plaintext from the findings -- needs hashcat"),
-    ("5", "About / how it works", ""),
+    ("5", "Wi-Fi handshake capture", "scan, auto-tune, deauth + capture -> hashcat 22000 -- needs root"),
+    ("6", "About / how it works", ""),
     ("q", "Quit", ""),
 ]
 
@@ -188,8 +189,8 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
     if clear is None:
         clear = lambda: _clear(out)
 
-    accent = {"1": "green", "2": "cyan", "3": "red", "4": "red", "5": "cyan",
-              "q": "dim"}
+    accent = {"1": "green", "2": "cyan", "3": "red", "4": "red", "5": "red",
+              "6": "cyan", "q": "dim"}
     last_code = 0
     while True:
         clear()
@@ -232,6 +233,9 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
             enter()
             last_code = _do_analyze(parser, dispatch, reader, writer, out, crack=True)
         elif choice == "5":
+            enter()
+            last_code = _do_wpa(parser, dispatch, reader, writer, out)
+        elif choice == "6":
             enter()
             _about(writer, out)
         else:
@@ -306,6 +310,83 @@ def _do_live(parser, dispatch, reader, writer, out, poison: bool) -> int:
             return 0
     writer("")
     return dispatch(argv)
+
+
+def _do_wpa(parser, dispatch, reader, writer, out) -> int:
+    """Menu-driven WPA/WPA2 handshake capture: pick the monitor adapter, scan for
+    networks, pick one, and MATT auto-detects its channel, sets monitor mode, and
+    runs the deauth + capture -> hashcat 22000. The operator never touches iw."""
+    from matt import wifi
+    gone = wifi.missing_tools()
+    if gone:
+        writer(paint("  missing tools: " + ", ".join(gone), "red", stream=out))
+        writer(_dim("  install with: sudo apt install aircrack-ng hcxtools iw", out))
+        return 2
+
+    ifaces = _interfaces()
+    if ifaces:
+        writer(_dim("  interfaces: " + ", ".join(ifaces), out))
+    # default to a second interface if there is one (the dedicated monitor
+    # adapter), else the only one.
+    default_if = ifaces[-1] if len(ifaces) > 1 else (ifaces[0] if ifaces else "wlan1")
+    iface = reader(f"  monitor-capable adapter [{default_if}]: ").strip() or default_if
+
+    writer(_dim(f"  scanning on {iface} for nearby Wi-Fi networks ...", out))
+    try:
+        aps = [a for a in wifi.list_aps(iface) if a.get("ssid")]
+    except Exception as exc:
+        writer(paint(f"  scan failed: {exc}", "red", stream=out))
+        return 2
+    if not aps:
+        writer(paint("  no networks found -- is the adapter in range / powered?",
+                     "red", stream=out))
+        return 2
+
+    writer("")
+    writer(_bold("  #   SSID                       CH    SIGNAL   BSSID", out))
+    for i, a in enumerate(aps[:20], 1):
+        writer("  %-3d %-26s %-5s %+4s dBm  %s" % (
+            i, (a["ssid"] or "<hidden>")[:26], a.get("channel") or "?",
+            int(a["signal"]) if a.get("signal") is not None else "?", a["bssid"]))
+    writer("")
+    pick = reader("  target: pick a number, or type an SSID/BSSID: ").strip()
+    target = None
+    if pick.isdigit() and 1 <= int(pick) <= len(aps):
+        target = aps[int(pick) - 1]
+    else:
+        for a in aps:
+            if pick and (pick.lower() == a["bssid"] or pick == a["ssid"]):
+                target = a
+                break
+    if not target or not target.get("channel"):
+        writer(paint("  no usable target selected.", "red", stream=out))
+        return 2
+
+    writer(_dim("  target: %s  (BSSID %s, channel %s)"
+                % (target["ssid"], target["bssid"], target["channel"]), out))
+    client = reader("  client MAC to deauth [broadcast]: ").strip()
+
+    writer("")
+    writer(paint("  A deauth briefly knocks a client off this network to force a "
+                 "reconnect.", "red", "bold", stream=out))
+    ok = reader(paint("  type YES if you own / are authorized to test this network: ",
+                      "red", stream=out)).strip()
+    if ok != "YES":
+        writer(paint("  not confirmed -- nothing was run.", "red", stream=out))
+        return 2
+
+    argv = ["--wpa", "--iface", iface, "--bssid", target["bssid"],
+            "--channel", str(target["channel"]), "--no-banner",
+            "--i-have-written-authorization"]
+    if client:
+        argv += ["--client", client]
+    writer("")
+    code = dispatch(argv)
+    # offer to crack a captured handshake straight away
+    if _yes(reader("  crack the captured handshake now with hashcat? [y/N]: ")):
+        writer("")
+        dispatch(["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner"])
+    return code
 
 
 def _about(writer, out) -> None:

@@ -64,8 +64,10 @@ PMKID = ("STOREWiFi" + "ee" * 16 + "*" + "aa" * 6 + "*" + "bb" * 6 + "*" + "cc" 
          + "*" + "dd" * 16)
 
 # hashcat 22000: <str><ap-nonce-part>*<bssid>*<mac_ap>*<mac_cli>*<s-nonce-part>*<message>
-EH2912 = ("STOREWiFi" + "11" * 16 + "*" + "aa" * 6 + "*" + "bb" * 6 + "*" + "cc" * 6
-          + "*" + "22" * 16 + "*" + "33" * 98)
+# The real hashcat 22000 line that hcxpcapngtool writes (and `matt --wpa`
+# produces): WPA*<02=EAPOL>*<MIC 16B>*<bssid 6B>*<sta 6B>*<essid>*<anonce>*<eapol>*<mp>
+EH2912 = ("WPA*02*" + "11" * 16 + "*" + "aa" * 6 + "*" + "bb" * 6
+          + "*" + "53746f7265" + "*" + "22" * 32 + "*" + "33" * 121 + "*02")
 
 MD5 = "5f4dcc3b5aa765d61d8327deb882cf99"  # md5("password")
 SHA1 = "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8"
@@ -1271,6 +1273,27 @@ class TestCli(TempDirCase):
             code = cli.main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
+    def test_analyze_only_accepts_a_raw_hash_file(self):
+        """A plain hash file (e.g. a matt-wpa.22000 the --wpa step wrote) is
+        ingested line by line, classified, and analyzable -- not just JSON."""
+        p = os.path.join(self.tmp, "hs.22000")
+        with open(p, "w") as fh:
+            fh.write("WPA*02*" + "11" * 16 + "*" + "aa" * 6 + "*" + "bb" * 6
+                     + "*53746f7265*" + "22" * 32 + "*" + "33" * 121 + "*02\n")
+        code, out, err = self.cli("--analyze-only", p, "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["findings"][0]["kind"], "wpa-eh2912")
+        self.assertEqual(data["findings"][0]["hashcat_mode"], "22000")
+
+    def test_analyze_only_still_rejects_broken_json(self):
+        p = os.path.join(self.tmp, "broken.json")
+        with open(p, "w") as fh:
+            fh.write('{"payloads": [')          # looks like JSON, but invalid
+        code, out, err = self.cli("--analyze-only", p)
+        self.assertNotEqual(code, 0)
+        self.assertIn("not valid JSON", err)
+
     def test_parser_advertises_every_gate(self):
         from matt import cli
         text = cli.build_parser().format_help()
@@ -1508,6 +1531,46 @@ class TestUi(unittest.TestCase):
         self.assertIn("--analyze-only", calls[0])
         self.assertIn("somereport.json", calls[0])
         self.assertIn("--no-banner", calls[0])
+
+    def test_menu_wpa_scans_picks_and_dispatches_with_the_right_argv(self):
+        """Menu option 5: scan -> pick a network -> MATT auto-fills BSSID+channel
+        and dispatches --wpa with the authorization gate, no iw typing by hand."""
+        from matt import ui, wifi
+        calls = []
+        orig = wifi.list_aps
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "8a:a1:d8:2d:0e:95", "ssid": "Starlink",
+             "channel": 11, "signal": -41.0}]
+        try:
+            # adapter, pick #1, no client, YES to auth, no to crack, then quit
+            answers = iter(["5", "wlan1", "1", "", "YES", "n", "q"])
+            ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
+                        reader=lambda p="": next(answers, "q"),
+                        writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps = orig
+        self.assertTrue(calls, "menu never dispatched the WPA action")
+        argv = calls[0]
+        self.assertIn("--wpa", argv)
+        self.assertIn("--iface", argv); self.assertIn("wlan1", argv)
+        self.assertIn("--bssid", argv); self.assertIn("8a:a1:d8:2d:0e:95", argv)
+        self.assertIn("--channel", argv); self.assertIn("11", argv)
+        self.assertIn("--i-have-written-authorization", argv)
+
+    def test_menu_wpa_without_authorization_runs_nothing(self):
+        from matt import ui, wifi
+        calls = []
+        orig = wifi.list_aps
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
+        try:
+            answers = iter(["5", "wlan1", "1", "", "no", "q"])
+            ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
+                        reader=lambda p="": next(answers, "q"),
+                        writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps = orig
+        self.assertEqual(calls, [], "WPA must not run without typed authorization")
 
     def test_menu_mitm_requires_typed_authorization(self):
         """Choosing live MITM but not typing YES must run nothing and return 2."""
@@ -2100,10 +2163,16 @@ class TestCredentialDestination(unittest.TestCase):
 class TestWifiHandshake(unittest.TestCase):
     def test_command_builders(self):
         from matt import wifi
-        self.assertIn("airmon-ng", wifi.monitor_start("wlan1"))
-        self.assertEqual(wifi.capture("wlan1mon", "AA", "6", "p")[:2],
+        # monitor mode is set in place with iw/ip, not airmon-ng (works on the
+        # in-kernel USB drivers where no renamed *mon interface is created)
+        ups = wifi.monitor_up("wlan1")
+        self.assertIn(["sudo", "iw", "dev", "wlan1", "set", "type", "monitor"], ups)
+        self.assertEqual(wifi.set_channel("wlan1", 149),
+                         ["sudo", "iw", "dev", "wlan1", "set", "channel", "149"])
+        self.assertEqual(wifi.capture("wlan1", "AA", "6", "p")[:2],
                          ["sudo", "airodump-ng"])
-        d = wifi.deauth("wlan1mon", "AA:BB", client="CC:DD", count=3)
+        self.assertIn("wlan1", wifi.capture("wlan1", "AA", "6", "p"))  # same iface
+        d = wifi.deauth("wlan1", "AA:BB", client="CC:DD", count=3)
         self.assertIn("--deauth", d)
         self.assertIn("3", d)
         self.assertIn("-c", d)
@@ -2113,8 +2182,24 @@ class TestWifiHandshake(unittest.TestCase):
     def test_plan_is_in_order(self):
         from matt import wifi
         labels = [label for label, _ in wifi.plan("wlan1", "AA", "6")]
-        self.assertEqual(labels,
-                         ["monitor on", "capture", "deauth", "convert", "monitor off"])
+        # the key stages appear in order (monitor on is several iw/ip commands)
+        for stage in ("monitor on", "set channel", "capture", "deauth",
+                      "convert", "monitor off"):
+            self.assertIn(stage, labels)
+        self.assertLess(labels.index("capture"), labels.index("deauth"))
+        self.assertLess(labels.index("deauth"), labels.index("convert"))
+
+    def test_scan_parsing_finds_channel_for_an_ap(self):
+        from matt import wifi
+        scan = (
+            "BSS aa:bb:cc:dd:ee:ff(on wlan0)\n"
+            "\tfreq: 2462\n\tsignal: -41.00 dBm\n\tSSID: HomeNet\n"
+            "BSS 11:22:33:44:55:66(on wlan0)\n"
+            "\tfreq: 5745\n\tsignal: -55.00 dBm\n\tSSID: HomeNet\n")
+        aps = wifi.parse_scan(scan)
+        self.assertEqual(aps[0]["signal"], -41.0)              # strongest first
+        self.assertEqual(wifi.channel_for(aps, bssid="11:22:33:44:55:66"), 149)
+        self.assertEqual(wifi.channel_for(aps, ssid="HomeNet"), 11)  # strongest match
 
     def test_orchestrate_runs_the_pipeline_with_injected_runner(self):
         from matt import wifi

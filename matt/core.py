@@ -326,17 +326,20 @@ def type_hash(payload) -> "tuple[str, str | None]":
         ):
             return ("wpa-pmkid", HASHCAT_MODES["wpa-pmkid"])
 
-    # -- 802.11 WPA2/3 handshake, hashcat 22000 (WPA-PBKDF2-PMKID+EAPOL) ----------
-    #   <SSID><AP-nonce-part>*<bssid>*<mac_ap>*<mac_cli>*<S-nonce-part>*<EAPOL>
-    if raw.count(b"*") == 5:
+    # -- 802.11 WPA/WPA2 handshake or PMKID, hashcat 22000 (hcxpcapngtool form) ---
+    #   WPA*<01|02>*<PMKID|MIC>*<bssid>*<sta>*<essid>*<anonce>*<eapol>*<mp>
+    #   type 01 = PMKID, type 02 = EAPOL 4-way handshake; hashcat reads BOTH as
+    #   -m 22000. This is exactly the line hcxpcapngtool writes and that
+    #   `matt --wpa` produces, so a real captured handshake is classified instead
+    #   of falling through to "unknown" (field 2 is the 16-byte MIC/PMKID, fields
+    #   3 and 4 are the AP and station MACs).
+    if raw[:4] == b"WPA*" and raw.count(b"*") >= 5:
         parts = raw.split(b"*")
         if (
-            _looks_like_hex(parts[1])
-            and _looks_like_hex(parts[2])
-            and _hex_payload_len(parts[1]) == 6
-            and _hex_payload_len(parts[2]) == 6
-            and _looks_like_hex(parts[5])
-            and _hex_payload_len(parts[5]) >= 68
+            parts[1] in (b"01", b"02")
+            and _looks_like_hex(parts[2]) and _hex_payload_len(parts[2]) == 16
+            and _looks_like_hex(parts[3]) and _hex_payload_len(parts[3]) == 6
+            and _looks_like_hex(parts[4]) and _hex_payload_len(parts[4]) == 6
         ):
             return ("wpa-eh2912", HASHCAT_MODES["wpa-eh2912"])
 
