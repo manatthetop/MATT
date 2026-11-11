@@ -1819,6 +1819,47 @@ class TestTlsAlpnQuic(unittest.TestCase):
         self.assertEqual(f["kind"], "quic")
 
 
+class TestArp(unittest.TestCase):
+    """ARP has no secret in it -- who-has/is-at gossip, not auth -- but it is
+    the single most common thing a broadcast-LAN capture picks up (roughly
+    two thirds of the non-TLS traffic in one real capture against this repo).
+    Without this, every one of those packets fell into the generic "does not
+    match any hashcat format" catch-all, which reads as suspicious for
+    something this mundane."""
+
+    def _arp(self, op: int, smac: bytes, sip: str, tmac: bytes, tip: str) -> bytes:
+        def ip(s):
+            return bytes(int(o) for o in s.split("."))
+        return (b"\x00\x01\x08\x00\x06\x04" + op.to_bytes(2, "big")
+                + smac + ip(sip) + tmac + ip(tip))
+
+    def test_arp_request_decoded_not_raw(self):
+        pkt = self._arp(1, b"\xca\xbe\xe5\xb4\xa4\xc5", "10.20.5.22",
+                        b"\x00" * 6, "10.20.5.1")
+        info = core.arp_info(pkt)
+        self.assertEqual(info["op"], "request")
+        self.assertEqual(info["sender_ip"], "10.20.5.22")
+        self.assertEqual(info["target_ip"], "10.20.5.1")
+        f = core.candidates_from_payload(pkt)[0]
+        self.assertEqual(f["kind"], "arp")
+        self.assertFalse(f["credential_bearing"])
+        prose = core.stage2_prose(f)
+        self.assertIn("who has 10.20.5.1", prose)
+        self.assertIn("nothing to crack", prose)
+
+    def test_arp_reply_decoded(self):
+        pkt = self._arp(2, b"\xaa\xbb\xcc\xdd\xee\xff", "10.20.4.1",
+                        b"\xca\xbe\xe5\xb4\xa4\xc5", "10.20.5.22")
+        f = core.candidates_from_payload(pkt)[0]
+        self.assertEqual(f["kind"], "arp")
+        prose = core.stage2_prose(f)
+        self.assertIn("10.20.4.1 is at aa:bb:cc:dd:ee:ff", prose)
+
+    def test_non_arp_bytes_untouched(self):
+        self.assertIsNone(core.arp_info(b"not an arp packet, just text"))
+        self.assertIsNone(core.arp_info(b"\x00\x01\x08\x00\x06\x04short"))
+
+
 class TestWifiHandshake(unittest.TestCase):
     def test_command_builders(self):
         from matt import wifi

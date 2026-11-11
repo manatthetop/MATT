@@ -1047,6 +1047,32 @@ def quic_info(raw: bytes):
     return None
 
 
+def arp_info(raw: bytes):
+    """Decode an Ethernet ARP packet (IPv4-over-Ethernet shape only), or None.
+
+    ARP has no IP header for strip_wire_headers to find, so these packets
+    arrive at candidates_from_payload exactly as captured -- 28 bytes of
+    hardware/protocol type, lengths, opcode, then sender/target MAC+IP, plus
+    whatever Ethernet padding tcpdump included. There is no secret in an ARP
+    frame (it is who-has/is-at gossip, not auth), so this is purely so ARP
+    traffic reads as "ARP: who has 10.0.0.1? tell 10.0.0.5" instead of falling
+    into the generic "does not match any hashcat format" catch-all, which
+    reads as suspicious for something this mundane.
+    """
+    if len(raw) < 28 or raw[:4] != b"\x00\x01\x08\x00" or raw[4] != 6 or raw[5] != 4:
+        return None
+    op = (raw[6] << 8) | raw[7]
+    if op not in (1, 2):
+        return None
+    smac = ":".join("%02x" % b for b in raw[8:14])
+    sip = ".".join(str(b) for b in raw[14:18])
+    tmac = ":".join("%02x" % b for b in raw[18:24])
+    tip = ".".join(str(b) for b in raw[24:28])
+    return {"op": "request" if op == 1 else "reply",
+            "sender_mac": smac, "sender_ip": sip,
+            "target_mac": tmac, "target_ip": tip}
+
+
 def _usm_username(seq: bytes):
     """The msgUserName (4th field) out of an SNMPv3 USM SEQUENCE: OCTET engineID,
     INTEGER boots, INTEGER time, OCTET userName, ..."""
@@ -1397,6 +1423,17 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
         if quic:
             add("quic", None, quic, "quic", credential_bearing=False)
 
+    # 5f. ARP: no secret rides in it, just who-has/is-at gossip, but it is the
+    #     single most common thing a broadcast LAN capture picks up, so give
+    #     it its own sentence instead of letting it pile into "raw" below.
+    if not found:
+        arp = arp_info(raw)
+        if arp:
+            summary = (f"who-has {arp['target_ip']} tell {arp['sender_ip']}"
+                      if arp["op"] == "request" else
+                      f"{arp['sender_ip']} is-at {arp['sender_mac']}")
+            add("arp", None, summary, "arp", credential_bearing=False, **arp)
+
     # 6. nothing structured: keep the payload itself so a human can look at it.
     if not found and raw:
         method, text = decode_field(raw)
@@ -1601,6 +1638,15 @@ def stage2_prose(finding: dict) -> str:
         return (f"{host} presented a TLS certificate for {candidate}, issued by "
                 f"{issuer!r}{tail}. Read from the ServerHello in the clear; the "
                 "session payload stays encrypted.")
+
+    if kind == "arp":
+        if finding.get("op") == "request":
+            return (f"{host} broadcast ARP: who has {finding.get('target_ip')}? "
+                    f"tell {finding.get('sender_ip')} ({finding.get('sender_mac')}). "
+                    "Address resolution, not a credential -- nothing to crack.")
+        return (f"{host} sent an ARP reply: {finding.get('sender_ip')} is at "
+                f"{finding.get('sender_mac')}. Address resolution, not a credential "
+                "-- nothing to crack.")
 
     if kind == "quic":
         return (f"{host} opened a QUIC / HTTP3 connection ({candidate}). The SNI is "
