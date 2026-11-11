@@ -861,7 +861,7 @@ def main(argv=None) -> int:
         argv = sys.argv[1:]
     args = parser.parse_args(argv)
 
-    if args.identify:
+    if args.identify is not None:
         return _do_identify(args.identify)
 
     if args.dashboard is not None:
