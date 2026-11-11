@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+matt_analysis.json
+capture_report.json
+matt_*_all.deb
+*.pyz

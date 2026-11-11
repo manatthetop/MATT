@@ -1,0 +1,27 @@
+# MATT (Man At The Top) -- dependency manifest
+#
+# There are no runtime dependencies, and that is the feature, not an oversight.
+#
+# The whole program is the standard library: json, hashlib, re, base64,
+# subprocess, urllib (inside matt/model.py only), argparse. A default run
+# imports nothing third-party, opens no socket, and costs zero usage tokens,
+# so it works on a target-facing laptop with no network and no venv. tests/
+# asserts this two ways, so an accidental `pip install requests` added to
+# matt/core.py breaks the build instead of breaking the engagement budget.
+#
+# The optional stage 2 LLM writer needs nothing installed either:
+# matt/model.py speaks the Messages API with urllib.request. Export a key and
+# pass --use-model.
+#
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   python3 -m matt.cli --iface wlan0 --use-model --allow-default-endpoint
+#
+# Development only (the tests run under unittest with no install at all):
+#
+#   pytest>=7        # optional: same tests, nicer reporting
+#
+# External tools, invoked as subprocesses, never imported:
+#
+#   tcpdump | tshark   # stage 1 payload capture (tshark -x output is accepted)
+#   ettercap           # ARP poisoning for the live run
+#   hashcat            # offline cracking of the candidates MATT writes

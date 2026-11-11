@@ -1,0 +1,43 @@
+name: CI
+
+# Run the test suite on every push and PR to main. MATT has no runtime
+# dependencies -- the whole program is the standard library -- so there is
+# nothing to install; CI just checks out the code and runs unittest.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unittest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show Python version
+        run: python --version
+
+      - name: Byte-compile the package (syntax check)
+        run: python -m compileall -q matt tests
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v

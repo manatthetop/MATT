@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""matt -- launcher for the MATT toolkit (MAN AT THE TOP).
+
+Tiny on purpose: it puts the MATT package (this file's repo root) on sys.path
+and hands straight off to matt.cli.main(). It resolves its own real path first,
+so it works when installed as a symlink on PATH (e.g. /usr/local/bin/matt ->
+<repo>/bin/matt) and under sudo, which strips PYTHONPATH.
+"""
+import os
+import sys
+
+_here = os.path.dirname(os.path.realpath(__file__))   # <repo>/bin
+_root = os.path.dirname(_here)                         # <repo>
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+try:
+    from matt.cli import main
+except Exception as exc:  # pragma: no cover
+    sys.stderr.write("matt: cannot import the MATT package from %s: %s\n"
+                     % (_root, exc))
+    sys.exit(1)
+
+if __name__ == "__main__":
+    sys.exit(main())

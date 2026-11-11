@@ -1,0 +1,42 @@
+name: Release
+
+# On every version tag (v1.2.3), build the single-file zipapp binary and attach
+# it to the GitHub release for that tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-binary:
+    name: Build and attach matt.pyz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests
+
+      - name: Build the zipapp binary
+        run: |
+          rm -rf build && mkdir -p build
+          cp -r matt build/
+          printf 'import sys\nfrom matt.cli import main\nsys.exit(main())\n' > build/__main__.py
+          find build -name __pycache__ -type d -exec rm -rf {} + || true
+          python -m zipapp build -o matt.pyz -p "/usr/bin/env python3"
+          chmod +x matt.pyz
+          ./matt.pyz --version
+
+      - name: Attach matt.pyz to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: matt.pyz
+          fail_on_unmatched_files: true

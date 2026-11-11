@@ -1,0 +1,38 @@
+# Maintainer: manatthetop
+# AUR PKGBUILD for MATT (MAN AT THE TOP)
+pkgname=matt
+pkgver=1.5.0
+pkgrel=1
+pkgdesc="MAN AT THE TOP: authorized MITM credential capture and decode toolkit"
+arch=('any')
+url="https://github.com/manatthetop/MATT"
+license=('custom')
+depends=('python>=3.11')
+optdepends=('tcpdump: live packet capture'
+            'wireshark-cli: tshark capture backend'
+            'ettercap: ARP-poison MITM'
+            'hashcat: offline cracking'
+            'aircrack-ng: WPA handshake capture'
+            'hcxtools: convert handshakes to 22000')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/manatthetop/MATT/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir/MATT-$pkgver"
+  install -d "$pkgdir/usr/share/matt/matt"
+  cp -r matt/* "$pkgdir/usr/share/matt/matt/"
+  find "$pkgdir/usr/share/matt" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+
+  install -d "$pkgdir/usr/bin"
+  cat > "$pkgdir/usr/bin/matt" <<'EOF'
+#!/usr/bin/env python3
+import sys
+sys.path.insert(0, "/usr/share/matt")
+from matt.cli import main
+sys.exit(main())
+EOF
+  chmod 0755 "$pkgdir/usr/bin/matt"
+
+  install -Dm644 man/matt.1 "$pkgdir/usr/share/man/man1/matt.1"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/matt/README.md"
+}

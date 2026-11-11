@@ -1,0 +1,122 @@
+{
+  "schema": "matt-capture/1",
+  "tool": "matt",
+  "mode": "live",
+  "interface": "wlan0",
+  "started": "2026-11-11T09:02:11Z",
+  "finished": "2026-11-11T09:03:11Z",
+  "duration_seconds": 60,
+  "gateway": "10.0.4.1",
+  "clients": [
+    "10.0.4.25",
+    "10.0.4.50",
+    "10.0.4.60",
+    "10.0.4.61",
+    "10.0.4.62",
+    "10.0.4.9",
+    "10.0.4.30",
+    "10.0.4.40",
+    "10.0.4.31"
+  ],
+  "poison": {
+    "started": true,
+    "target": "10.0.4.1",
+    "method": "arp:remote"
+  },
+  "capture": {
+    "tool": "tcpdump",
+    "returncode": 0,
+    "note": ""
+  },
+  "tool_versions": {
+    "tcpdump": "tcpdump 4.99.4",
+    "ettercap": "ettercap 0.8.3.1"
+  },
+  "payloads": [],
+  "hosts": {
+    "10.0.4.25 (WKS-FINANCE-07)": {
+      "payloads": [
+        {
+          "payload": "jdoe::CORP:1122334455667788:0047df8b30159ae2de545184bf96bce2:010100000000000000112233445566778899aabbccddeeff000000000200080043004f005200500001001800460049004c0045005300450052005600450052003000310003002e00660069006c006500730065007200760065007200300031002e0063006f00720070002e006c006f00630061006c0000000000",
+          "protocol": "smb-ntlmssp"
+        }
+      ]
+    },
+    "10.0.4.50 (intranet.corp.local)": {
+      "payloads": [
+        {
+          "payload": "POST /portal/login HTTP/1.1\r\nHost: intranet.corp.local\r\n\r\nUsername=msmith&Password=Summer2026!&Domain=CORP",
+          "protocol": "http"
+        }
+      ]
+    },
+    "10.0.4.60 (corp-ftp)": {
+      "payloads": [
+        {
+          "payload": "220 corp-ftp ProFTPD\r\nUSER backup\r\nPASS Backup#2026\r\n",
+          "protocol": "ftp"
+        }
+      ]
+    },
+    "10.0.4.61 (mail.corp.local)": {
+      "payloads": [
+        {
+          "payload": "* OK IMAP4\r\na1 LOGIN hreyes Welcome1\r\n",
+          "protocol": "imap"
+        },
+        {
+          "payload": "AUTH PLAIN AG5vcmVwbHkATWFpbGVyITk5\r\n",
+          "protocol": "smtp"
+        },
+        {
+          "payload": "+OK POP3 ready\r\nUSER dkaur\r\nPASS Spring2026!\r\n",
+          "protocol": "pop3"
+        }
+      ]
+    },
+    "10.0.4.9 (dc01.corp.local)": {
+      "payloads": [
+        {
+          "payload": "303702010160320201030423636e3d7376632d7363616e2c6f753d7376632c64633d636f72702c64633d6c6f63616c80085363346e6e337221",
+          "protocol": "ldap"
+        },
+        {
+          "payload": "$krb5asrep$23$asmith@CORP.LOCAL:abababababababababababababababab$cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "protocol": "kerberos"
+        },
+        {
+          "payload": "$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db01.corp.local:1433*$efefefefefefefefefefefefefefefef$12121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212",
+          "protocol": "kerberos"
+        },
+        {
+          "payload": "$krb5pa$23$rjohnson$CORP.LOCAL$9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+          "protocol": "kerberos"
+        }
+      ]
+    },
+    "10.0.4.30 (switch01)": {
+      "payloads": [
+        {
+          "payload": "301e02010104097333637233742d7277a00c0201010201000201003000",
+          "protocol": "snmp"
+        }
+      ]
+    },
+    "10.0.4.40 (console-srv)": {
+      "payloads": [
+        {
+          "payload": "fffd18fffd206c6f67696e3a2072747261646d696e0d0a50617373776f72643a2052307574657250617373210d0a",
+          "protocol": "telnet"
+        }
+      ]
+    },
+    "10.0.4.31 (nms01)": {
+      "payloads": [
+        {
+          "payload": "303102010330010004273025040580001f880402010502011104066e65746d6f6e040c00000000000000000000000004000400",
+          "protocol": "snmpv3"
+        }
+      ]
+    }
+  }
+}

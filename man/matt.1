@@ -1,0 +1,95 @@
+.TH MATT 1 "2026-11-11" "MATT 1.7.0" "MATT Manual"
+.SH NAME
+matt \- MAN AT THE TOP: authorized MITM credential capture and decode
+.SH SYNOPSIS
+.B matt
+.RI [ options ]
+.br
+.B matt --analyze-only
+.I REPORT
+.RI [ --pretty | --table | --json ]
+.RI [ --crack ]
+.br
+.B sudo matt --iface
+.I NAME
+.B --i-have-written-authorization
+.RI [ --no-poison ]
+.SH DESCRIPTION
+.B MATT
+is a two-stage credential-recovery toolkit for authorized wireless
+man-in-the-middle engagements. Stage one ARP-poisons the local segment
+(ettercap) and sniffs it (tcpdump/tshark), reassembling each packet and writing a
+deterministic
+.IR capture_report.json .
+Stage two decodes those bytes into hashcat-ready candidates and plain-English
+findings, optionally cracking them.
+.PP
+MATT has no runtime dependencies (pure Python standard library). A default run
+opens no socket and costs zero tokens; artificial intelligence is never required.
+.SH MODES
+.TP
+.B matt
+With no arguments in a terminal, open the interactive menu.
+.TP
+.B matt --analyze-only \fIREPORT\fR
+Decode an existing capture report. No root, no interface, no network.
+.TP
+.B sudo matt --iface \fINAME\fR --i-have-written-authorization
+Live ARP-poison capture. Add
+.B --no-poison
+for passive sniffing only.
+.SH OPTIONS
+.TP
+.B --pretty
+Print one block per credential, source host to destination.
+.TP
+.B --table
+Print one compact row per credential (host, target, user, type, secret).
+.TP
+.B --json
+Print the analysis as JSON for piping into jq or other tools.
+.TP
+.B --crack
+Run hashcat on the findings and show any recovered plaintext.
+.TP
+.B --wordlist \fIPATH\fR
+Wordlist for --crack (default /usr/share/wordlists/rockyou.txt).
+.TP
+.B --identify \fIHASH\fR
+Name a hash's likely type(s) and hashcat mode, and reverse it instantly if it is
+a common password.
+.TP
+.B --watch \fIDIR\fR
+Active response: watch a directory for new capture reports and analyze each as it
+appears.
+.TP
+.B --use-model
+Opt in to LLM-written prose. The only option that opens a socket.
+.TP
+.B --i-have-written-authorization
+Required for a live run. Confirms written authorization for the network.
+.TP
+.B --version
+Print the version and exit.
+.SH SAFETY
+A live run refuses to start unless the process is root, the
+.B --iface
+exists, and
+.B --i-have-written-authorization
+is given. Run only against networks you are authorized to test.
+.SH EXAMPLES
+.TP
+Analyze a capture and show a table:
+.B matt --analyze-only capture_report.json --table
+.TP
+Identify and reverse a hash:
+.B matt --identify 5f4dcc3b5aa765d61d8327deb882cf99
+.TP
+Live passive capture on Wi-Fi:
+.B sudo matt --iface wlan0 --no-poison --i-have-written-authorization
+.SH SEE ALSO
+.BR hashcat (1),
+.BR tcpdump (1),
+.BR ettercap (8)
+.PP
+Full guides: README.md, USAGE.md, INSTALL.md in the MATT repository.
