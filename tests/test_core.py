@@ -2064,6 +2064,27 @@ class TestWifiHandshake(unittest.TestCase):
         self.assertIn("deauth sent", res["steps"])
         self.assertIn("aireplay-ng", steps)
 
+    def test_orchestrate_reaps_the_capture_process_after_terminate(self):
+        """orchestrate() called cap.terminate() but never cap.wait(): a
+        terminated-but-unreaped airodump-ng became a zombie, one per --wpa
+        run, that only went away when the parent matt process itself exited.
+        A SIGTERM'd process still needs waiting on."""
+        from matt import wifi
+        out = os.path.join(self._tmp(), "hs.22000")
+        waited = []
+
+        class _P:
+            def terminate(self_inner):
+                pass
+            def wait(self_inner, timeout=None):
+                waited.append(timeout)
+
+        wifi.orchestrate("wlan1", "AA:BB", "6", out=out, capture_secs=0.1,
+                         runner=lambda cmd: None, popen=lambda cmd: _P(),
+                         which=lambda t: "/usr/bin/" + t)
+        self.assertTrue(waited, "orchestrate() must reap the capture process, "
+                                "not just signal it")
+
     def _tmp(self):
         import tempfile
         d = tempfile.mkdtemp(prefix="matt-wpa-test-")

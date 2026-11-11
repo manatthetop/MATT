@@ -129,6 +129,7 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
     finally:
         try:
             cap.terminate()
+            cap.wait(timeout=5)
         except Exception:
             pass
         result["steps"].append("capture stopped")
