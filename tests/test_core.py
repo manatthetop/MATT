@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import sys
@@ -2171,6 +2172,35 @@ class TestLlmnr(unittest.TestCase):
         self.assertEqual(log[0]["name"], "PRINTER")
         self.assertEqual(log[0]["victim"], "10.0.0.42")
         self.assertTrue(sk.sent)
+
+
+class TestIfaceIpv4(unittest.TestCase):
+    """cli._iface_ipv4() feeds --llmnr's --our-ip auto-detection. It opened a
+    socket.socket(AF_INET, SOCK_DGRAM) for the SIOCGIFADDR ioctl and never
+    closed it -- one leaked fd per --llmnr invocation that didn't pass an
+    explicit --our-ip. Long-running or repeated use (the menu, a script
+    calling matt repeatedly) would slowly exhaust the process's fd limit."""
+
+    def test_socket_is_closed_after_the_ioctl(self):
+        from matt import cli
+        created = []
+        real_socket = socket.socket
+
+        class _Spy(real_socket):
+            def __init__(s, *a, **k):
+                super().__init__(*a, **k)
+                created.append(s)
+
+        with unittest.mock.patch("matt.cli.socket.socket", _Spy):
+            cli._iface_ipv4("lo")   # "lo" is enough to exercise the ioctl path
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0]._closed,
+                        "_iface_ipv4 must close the socket it opens")
+
+    def test_no_iface_returns_none_without_opening_anything(self):
+        from matt import cli
+        self.assertIsNone(cli._iface_ipv4(None))
+        self.assertIsNone(cli._iface_ipv4(""))
 
 
 if __name__ == "__main__":

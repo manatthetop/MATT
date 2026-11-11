@@ -371,9 +371,9 @@ def _iface_ipv4(iface):
     try:
         import fcntl
         import struct as _struct
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        return socket.inet_ntoa(fcntl.ioctl(
-            s.fileno(), 0x8915, _struct.pack("256s", iface[:15].encode()))[20:24])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            return socket.inet_ntoa(fcntl.ioctl(
+                s.fileno(), 0x8915, _struct.pack("256s", iface[:15].encode()))[20:24])
     except Exception:
         return None
 
