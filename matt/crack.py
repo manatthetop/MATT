@@ -74,7 +74,7 @@ def _default_runner(cmd, timeout):
 
 
 def crack(findings, wordlist=DEFAULT_WORDLIST, hashcat="hashcat", runner=None,
-          timeout=300, tmpdir=None, extra_args=()) -> list:
+          timeout=300, tmpdir=None, extra_args=(), optimized=True) -> list:
     """Run hashcat over every crackable finding and return a result per finding.
 
     Each result is a dict: host, username, target, kind, mode, candidate, and
@@ -92,6 +92,8 @@ def crack(findings, wordlist=DEFAULT_WORDLIST, hashcat="hashcat", runner=None,
     recovered: dict = {}
     notes: dict = {}
 
+    if optimized and "-O" not in extra_args:
+        extra_args = tuple(extra_args) + ("-O",)
     try:
         _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
                     recovered, notes)
@@ -135,27 +137,68 @@ def _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
             pass
         with open(hashfile, "w", encoding="utf-8") as fh:
             fh.write("\n".join(g["candidate"] for g in group) + "\n")
-        cmd = [hashcat, "-m", mode, "-a", "0", "--potfile-disable", "--quiet",
-               "-o", outfile, hashfile, wordlist, *extra_args]
-        proc = None
-        try:
-            proc = runner(cmd, timeout)
-        except subprocess.TimeoutExpired:
+
+        base = [hashcat, "-m", mode, "-a", "0", "--potfile-disable", "--quiet",
+                "-o", outfile, hashfile, wordlist, *extra_args]
+
+        def _run(cmd):
+            try:
+                return runner(cmd, timeout), None
+            except subprocess.TimeoutExpired:
+                return None, "timed out"
+            except OSError as exc:
+                return None, "hashcat error: %s" % exc
+
+        proc, err = _run(base)
+        if err:
             for g in group:
-                notes[g["candidate"].lower()] = "timed out"
-            # a long mode (e.g. WPA) may still have written partial results
-        except OSError as exc:
-            for g in group:
-                notes[g["candidate"].lower()] = "hashcat error: %s" % exc
-            continue
-        # hashcat: 0 = cracked, 1 = exhausted. Anything else (e.g. out of
-        # memory on a small box) is an error, not an empty wordlist -- say so.
+                notes[g["candidate"].lower()] = err
+            if err.startswith("hashcat error"):
+                continue
+
+        # A weak / low-RAM box (e.g. a 4 GB laptop with only a CPU backend) can
+        # fail to allocate the default backend's memory and exit 0 having cracked
+        # NOTHING -- which looks exactly like an exhausted wordlist. Detect that
+        # from hashcat's own message and retry once pinned to the CPU backend
+        # with a small allocation, so cracking actually works on modest hardware.
+        out_text = ""
+        if proc is not None:
+            out_text = (getattr(proc, "stdout", "") or "") + \
+                       (getattr(proc, "stderr", "") or "")
+        def _is_oom(text):
+            return any(s in text for s in (
+                "Not enough allocatable device memory",
+                "No devices found/left", "Not enough allocatable"))
+
+        # Retry once pinned to the CPU backend, which allocates more modestly.
+        if _is_oom(out_text) and "-D" not in base and not _outfile_has_data(outfile):
+            proc, err = _run(base + ["-D", "1"])
+            if proc is not None:
+                out_text = (getattr(proc, "stdout", "") or "") + \
+                           (getattr(proc, "stderr", "") or "")
+
         rc = getattr(proc, "returncode", None)
-        if rc not in (None, 0, 1):
-            for g in group:
-                notes.setdefault(g["candidate"].lower(), "hashcat exited %s" % rc)
+        if not _outfile_has_data(outfile):
+            if _is_oom(out_text):
+                # Do NOT let this look like an exhausted wordlist: it is a
+                # resource failure, and the honest fix is a bigger box.
+                for g in group:
+                    notes[g["candidate"].lower()] = (
+                        "hashcat ran out of memory on this machine -- crack on a "
+                        "host with more RAM or a GPU")
+            elif rc not in (None, 0, 1):
+                for g in group:
+                    notes.setdefault(g["candidate"].lower(),
+                                     "hashcat exited %s" % rc)
         try:
             with open(outfile, "r", encoding="utf-8", errors="replace") as fh:
                 recovered.update(parse_outfile(fh.read()))
         except OSError:
             pass
+
+
+def _outfile_has_data(path) -> bool:
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False

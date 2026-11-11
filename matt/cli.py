@@ -151,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
                             "(default: /usr/share/wordlists/rockyou.txt)")
     crack.add_argument("--crack-timeout", type=int, default=300,
                        help="seconds per hashcat run before giving up (default: 300)")
+    crack.add_argument("--crack-slow", action="store_true",
+                       help="disable hashcat's optimized kernels (-O). MATT uses "
+                            "-O by default: much faster and far less memory (so it "
+                            "runs on low-RAM machines), at the cost of capping "
+                            "password length (~31 chars). Pass this to crack "
+                            "longer passwords exhaustively.")
 
     wifi = parser.add_argument_group(
         "wi-fi handshake (monitor-mode adapter + aircrack-ng/hcxtools)")
@@ -272,7 +278,8 @@ def _run_crack(findings, args) -> None:
         return
     print(_c("  running hashcat on %d candidate(s) against %s ..."
              % (len(targets), wl), "red"))
-    results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout)
+    results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout,
+                           optimized=not args.crack_slow)
     cracked = 0
     for r in results:
         who = r.get("username") or "(no user)"
@@ -577,7 +584,8 @@ def _annotate_crack(findings, args) -> None:
     wl = args.wordlist or _crack.DEFAULT_WORDLIST
     if not _crack.have_hashcat() or not os.path.exists(wl):
         return
-    results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout)
+    results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout,
+                           optimized=not args.crack_slow)
     plain = {r["candidate"]: r["plaintext"] for r in results if r["plaintext"]}
     for f in findings:
         if f.get("candidate") in plain:

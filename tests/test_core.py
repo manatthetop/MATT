@@ -1409,7 +1409,7 @@ class TestCli(TempDirCase):
         core.write_report(sample_report(), path)
         md5_hash = hashlib.md5(b"hunter2").hexdigest()
 
-        def fake_crack(findings, wordlist=None, timeout=None):
+        def fake_crack(findings, wordlist=None, timeout=None, optimized=True):
             return [{"host": f.get("host"), "username": f.get("username"),
                     "target": f.get("target"), "kind": f.get("kind"),
                     "mode": str(f.get("hashcat_mode")), "candidate": f["candidate"],
