@@ -1375,6 +1375,42 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 0, err)
         self.assertIn("letmein", out)   # md5(letmein) reversed instantly
 
+    def test_pretty_crack_shows_the_cracked_marker_not_the_stale_one(self):
+        """--crack used to run AFTER _print_findings in the non-table path,
+        so a credential that got cracked in this very run still printed with
+        the yellow "[#] ... still a hash" marker -- the real, correct result
+        only showed up in the separate crack summary below it. --table
+        already cracked first; this makes --pretty match it."""
+        import hashlib
+        path = self.path("capture_report.json")
+        core.write_report(sample_report(), path)
+        md5_hash = hashlib.md5(b"hunter2").hexdigest()
+
+        def fake_crack(findings, wordlist=None, timeout=None):
+            return [{"host": f.get("host"), "username": f.get("username"),
+                    "target": f.get("target"), "kind": f.get("kind"),
+                    "mode": str(f.get("hashcat_mode")), "candidate": f["candidate"],
+                    "plaintext": "hunter2" if f["candidate"] == md5_hash else None,
+                    "note": None}
+                   for f in __import__("matt.crack", fromlist=["crackable"])
+                   .crackable(findings)]
+
+        with unittest.mock.patch("matt.crack.have_hashcat", return_value=True), \
+             unittest.mock.patch("matt.crack.crack", fake_crack):
+            code, out, err = self.cli("--analyze-only", path, "--pretty",
+                                      "--crack", "--wordlist", "/dev/null")
+        self.assertEqual(code, 0, err)
+        self.assertIn("hunter2", out)   # the crack summary always had it
+        login_line = next(l for l in out.splitlines() if "/login" in l and "->" in l)
+        self.assertIn("[+]", login_line,
+                      "this finding was cracked in this very run, so the "
+                      "findings listing must show the solved marker [+], "
+                      "not the stale uncracked-hash marker [#]")
+        self.assertNotIn("[#]", login_line)
+        # and the crack-this-now summary must now run BEFORE the findings
+        # listing, so the marker above actually reflects this run's result
+        self.assertLess(out.index("cracked 1/2"), out.index(login_line))
+
     def test_version_flag(self):
         from matt import cli
         out = io.StringIO()

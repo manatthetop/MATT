@@ -717,10 +717,16 @@ def run_offline(args, parser=None) -> int:
             _annotate_crack(findings, args)
         _print_table(findings)
     else:
-        if args.pretty or not findings:
-            _print_findings(findings)
+        # --crack first: it sets f["plaintext"] on each cracked finding in
+        # place, which is what tells _print_findings to mark it [+] green
+        # instead of [#] yellow. Printing first and cracking after (the
+        # order this used to run in) meant the findings listing always
+        # showed a just-cracked credential as still uncracked, with the
+        # real result only visible in the separate crack summary below it.
         if args.crack:
             _run_crack(findings, args)
+        if args.pretty or not findings:
+            _print_findings(findings)
     return EXIT_OK
 
 
@@ -838,10 +844,12 @@ def run_live(args, parser) -> int:
             _annotate_crack(stats["findings"], args)
         _print_table(stats["findings"])
     else:
-        if args.pretty:
-            _print_findings(stats["findings"])
+        # Same ordering reason as run_offline: crack first so a just-cracked
+        # finding shows [+] green in the listing below it, not [#] yellow.
         if args.crack:
             _run_crack(stats["findings"], args)
+        if args.pretty:
+            _print_findings(stats["findings"])
     return EXIT_OK
 
 
