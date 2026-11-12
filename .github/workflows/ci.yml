@@ -80,12 +80,14 @@ jobs:
         shell: bash
         run: |
           choco install hashcat -y --no-progress
-          echo "---- where is hashcat.exe? ----"
-          where hashcat || true
-          echo "---- C:/tools tree ----"
-          find /c/tools -maxdepth 4 2>/dev/null || true
-          echo "---- C:/ProgramData/chocolatey/lib/hashcat tree ----"
-          find "/c/ProgramData/chocolatey/lib/hashcat" -maxdepth 4 2>/dev/null || true
+          # The chocolatey package extracts the real binary to
+          # C:\tools\hashcat-<ver>\hashcat.exe and only shims it onto PATH as
+          # a broken redirect to powershell.exe (seen on windows-latest as of
+          # 2026-11), so "hashcat" on PATH silently runs PowerShell instead of
+          # cracking anything. Put the real binary ahead of that shim.
+          real_hashcat="$(find /c/tools -maxdepth 2 -iname hashcat.exe | head -1)"
+          export PATH="$(dirname "$real_hashcat"):$PATH"
+          hashcat --version
           printf 'letmein\npassword123\nSummer2026!\n' > wl.txt
           out="$(python matt.pyz --analyze-only examples/enterprise_capture.json --crack --wordlist wl.txt --no-banner)"
           echo "$out"
