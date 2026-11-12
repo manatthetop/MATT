@@ -68,6 +68,38 @@ git clone https://github.com/manatthetop/MATT.git && \
   matt --help
 ```
 
+## Windows
+
+MATT's live ARP-poison MITM capture needs `tcpdump`/`ettercap` and is
+Linux-only — run that on Kali. Offline analysis (`--analyze-only`),
+`--identify`, and `--crack` (with hashcat) all work fully on Windows, since
+MATT itself is pure Python standard library.
+
+### One-liner (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/manatthetop/MATT/main/install.ps1 | iex
+```
+
+This downloads the latest `matt.pyz` release to `%LOCALAPPDATA%\MATT`, saves
+a copy of the offline demo capture alongside it, creates a `matt` command,
+and adds it to your PATH. Needs Python 3.11+ on PATH already (get it from
+[python.org](https://www.python.org/downloads/) or `winget install
+Python.Python.3.12`); the script tells you if it's missing.
+
+Re-run the same command any time to upgrade to the latest release.
+
+For `--crack` you'll also need `hashcat` on PATH (e.g. `choco install
+hashcat`). On some Windows boxes the chocolatey `hashcat` package's shim is
+broken and silently redirects to `powershell.exe` instead of the real
+binary — if `hashcat --version` doesn't print a version, look for the real
+`hashcat.exe` under `C:\tools\hashcat-*\` and put that folder ahead of
+`C:\ProgramData\chocolatey\bin` on PATH.
+
+Prefer to do it by hand? Download `matt.pyz` from the [latest
+release](https://github.com/manatthetop/MATT/releases) and run it with
+`python matt.pyz --help`.
+
 ## Try it immediately (no root, no network, no tokens)
 
 The repo ships an example enterprise capture — an SMB NTLMv2 hash, a web-app

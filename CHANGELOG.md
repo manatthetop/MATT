@@ -3,6 +3,24 @@
 All notable changes to MATT are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [Unreleased]
+
+### Added
+- **Windows installer (`install.ps1`)** — a one-line PowerShell install
+  (`irm .../install.ps1 | iex`) that downloads the latest `matt.pyz`
+  release and the offline demo capture, creates a `matt` command, and adds
+  it to PATH. MATT's live ARP-poison capture is Linux-only, so this covers
+  the offline analysis / `--identify` / `--crack` paths that do run on
+  Windows, and warns about the chocolatey `hashcat` package's broken PATH
+  shim (it redirects to `powershell.exe` instead of the real binary on at
+  least one observed Windows CI image).
+
+### Fixed
+- **A missing OpenCL/CUDA/HIP runtime was reported as an opaque `hashcat
+  exited <code>`.** `--crack` now recognizes hashcat's own "no compatible
+  platform found" fatal and says plainly that a GPU driver or CPU OpenCL
+  runtime is what's missing, instead of a bare exit code.
+
 ## [1.8.0] — 2026-11-12
 
 ### Added

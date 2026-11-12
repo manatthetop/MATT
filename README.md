@@ -109,8 +109,14 @@ sudo ln -s "$PWD/MATT/bin/matt" /usr/sbin/matt        # `sudo matt` for root
 External tools used as subprocesses (not imported): `tcpdump` or `tshark` for
 capture, `ettercap` for the ARP poison, and `hashcat` for the offline crack.
 
+On Windows (offline analysis and `--crack` only — live capture is Linux-only):
+
+```powershell
+irm https://raw.githubusercontent.com/manatthetop/MATT/main/install.ps1 | iex
+```
+
 See **[INSTALL.md](INSTALL.md)** for the full guide (including the Kali
-one-liner and troubleshooting).
+one-liner, the Windows installer, and troubleshooting).
 
 ### Try it immediately
 
