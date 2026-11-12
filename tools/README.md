@@ -3,12 +3,20 @@
 `credcap.py` generates a password wordlist built for how a real crack actually
 runs, for **authorized** testing only.
 
+The ready-to-use smart core — [`credcap.txt`](credcap.txt) (~58k entries,
+~630 KB) — is **shipped in this repo**, so you can crack with it straight away:
+
 ```bash
-python3 tools/credcap.py -o credcap.txt                       # smart core (~58k)
+sudo matt --analyze-only hs.22000 --crack --wordlist tools/credcap.txt   # use the shipped list
+
+python3 tools/credcap.py -o credcap.txt                       # regenerate the smart core (~58k)
 python3 tools/credcap.py -o credcap-full.txt \
-        --merge /usr/share/wordlists/rockyou.txt              # strict superset of rockyou
-sudo matt --analyze-only hs.22000 --crack --wordlist credcap.txt
+        --merge /usr/share/wordlists/rockyou.txt              # build the strict superset of rockyou
 ```
+
+The 14.4 M-entry `credcap-full` superset is **not** committed (it is far too
+large for git and is a rockyou derivative) — build it locally with `--merge`,
+as shown above.
 
 ## Why it beats rockyou
 
