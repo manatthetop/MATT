@@ -852,6 +852,11 @@ class TestCaptureHelpers(unittest.TestCase):
         with self.assertRaises(PermissionError):
             capture.require_root(1000)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"),
+                         "interface_exists reads /sys/class/net, which only "
+                         "exists on Linux; live capture is a Linux-only "
+                         "feature (MATT's offline analyze/crack path runs "
+                         "cross-platform, including Windows)")
     def test_interface_gate(self):
         capture.require_interface("lo")
         with self.assertRaises(FileNotFoundError) as ctx:
@@ -1291,6 +1296,9 @@ class TestCaptureHelpers(unittest.TestCase):
         with self.assertRaises(capture.GatewayDiscoveryError):
             capture.discover_gateway(route=route)
 
+    @unittest.skipUnless(hasattr(signal, "SIGKILL"),
+                         "SIGKILL is POSIX-only; stop_daemon's escalation is "
+                         "part of live-capture teardown, a Linux-only feature")
     def test_stop_daemon_escalates_to_sigkill(self):
         """A process that ignores SIGTERM must still get SIGKILL."""
         sent = []
@@ -1410,7 +1418,13 @@ class TestCli(TempDirCase):
         self.assertIn("root", err)
 
     def test_live_refuses_without_the_authorization_flag(self):
-        code, out, err = self.cli("--iface", "lo", "--euid", "0")
+        # Don't depend on a real "lo" interface existing (Windows has none,
+        # and interface_exists reads /sys/class/net, which doesn't exist
+        # there either) -- this test is only about the authorization gate,
+        # which runs after the interface check.
+        with unittest.mock.patch("matt.capture.interface_exists",
+                                 return_value=True):
+            code, out, err = self.cli("--iface", "lo", "--euid", "0")
         self.assertEqual(code, 2)
         self.assertIn("--i-have-written-authorization", err)
 
@@ -1520,8 +1534,12 @@ class TestCli(TempDirCase):
 
         with unittest.mock.patch("matt.crack.have_hashcat", return_value=True), \
              unittest.mock.patch("matt.crack.crack", fake_crack):
+            # crack() is mocked, so the wordlist's contents never matter --
+            # only that cli.py's os.path.exists(wl) gate passes. Reuse `path`
+            # (already written above) instead of "/dev/null", which doesn't
+            # exist on Windows.
             code, out, err = self.cli("--analyze-only", path, "--pretty",
-                                      "--crack", "--wordlist", "/dev/null")
+                                      "--crack", "--wordlist", path)
         self.assertEqual(code, 0, err)
         self.assertIn("hunter2", out)   # the crack summary always had it
         login_line = next(l for l in out.splitlines() if "/login" in l and "->" in l)
@@ -2882,6 +2900,12 @@ class TestIfaceIpv4(unittest.TestCase):
     explicit --our-ip. Long-running or repeated use (the menu, a script
     calling matt repeatedly) would slowly exhaust the process's fd limit."""
 
+    @unittest.skipUnless(sys.platform.startswith("linux"),
+                         "_iface_ipv4 uses fcntl's SIOCGIFADDR ioctl, which "
+                         "doesn't exist on Windows; there it just returns "
+                         "None (caught by the function's own except clause) "
+                         "without ever opening a socket, which is the "
+                         "correct, intentional degrade -- not a bug")
     def test_socket_is_closed_after_the_ioctl(self):
         from matt import cli
         created = []
