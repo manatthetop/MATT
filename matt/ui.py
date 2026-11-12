@@ -395,8 +395,7 @@ def _do_analyze(parser, dispatch, reader, writer, out, crack: bool = False) -> i
             "red", stream=out)))
     if do_crack:
         argv.append("--crack")
-        default_wl = "/usr/share/wordlists/rockyou.txt"
-        wl = reader(f"  wordlist [{default_wl}]: ").strip()
+        wl = _pick_wordlist(reader, writer, out)
         if wl:
             argv += ["--wordlist", wl]
     writer("")
@@ -511,8 +510,12 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     code = dispatch(argv)
     # offer to crack a captured handshake straight away
     if _yes(reader("  crack the captured handshake now with hashcat? [y/N]: ")):
+        argv = ["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner"]
+        wl = _pick_wordlist(reader, writer, out)
+        if wl:
+            argv += ["--wordlist", wl]
         writer("")
-        dispatch(["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner"])
+        dispatch(argv)
     return code
 
 
@@ -652,6 +655,71 @@ def _find_reports() -> list:
         return list(reversed(found))
     except Exception:
         return []
+
+
+_KNOWN_WORDLISTS = [
+    ("/usr/share/wordlists/rockyou.txt", "rockyou -- the classic leaked-password list"),
+    ("/usr/share/wordlists/credcap.txt",
+     "credcap -- smart core, front-loaded with likely/modern passwords"),
+    ("/usr/share/wordlists/credcap-full.txt",
+     "credcap-full -- credcap + full rockyou superset"),
+]
+
+
+def _pick_wordlist(reader, writer, out, default: str = None) -> "str | None":
+    """Offer every installed wordlist MATT knows about, plus the option to
+    generate a fresh credcap list on the spot. Returns a path, or None to let
+    the caller fall back to its own default (rockyou)."""
+    found = [(p, d) for p, d in _KNOWN_WORDLISTS if os.path.exists(p)]
+    writer(_dim("  wordlists found:", out))
+    for i, (p, d) in enumerate(found, 1):
+        writer(f"    ({i}) {p}")
+        writer(_dim(f"        {d}", out))
+    gkey = str(len(found) + 1)
+    writer(f"    ({gkey}) generate a custom credcap wordlist now")
+    writer("")
+    prompt_default = default or (found[0][0] if found else "/usr/share/wordlists/rockyou.txt")
+    answer = reader(f"  wordlist [{prompt_default}]: ").strip()
+    if answer == "":
+        return None
+    if answer.isdigit():
+        idx = int(answer)
+        if 1 <= idx <= len(found):
+            return found[idx - 1][0]
+        if idx == len(found) + 1:
+            return _generate_credcap(reader, writer, out)
+    return answer
+
+
+def _generate_credcap(reader, writer, out) -> "str | None":
+    """Interactively build a fresh credcap wordlist via tools/credcap.py and
+    return its path."""
+    try:
+        sys.path.insert(0, os.path.join(_HERE, "..", "tools"))
+        import credcap
+    except Exception as exc:
+        writer(paint(f"  could not load credcap: {exc}", "red", stream=out))
+        return None
+
+    out_path = reader("  output file [credcap-custom.txt]: ").strip() or "credcap-custom.txt"
+    years = reader("  years back to cover [12]: ").strip() or "12"
+    merge = reader("  merge in rockyou too for full coverage? [y/N]: ").strip()
+    argv = ["-o", out_path, "--years", years]
+    if _yes(merge):
+        rk = "/usr/share/wordlists/rockyou.txt"
+        if os.path.exists(rk):
+            argv += ["--merge", rk]
+        else:
+            writer(_dim(f"  {rk} not found -- skipping merge", out))
+    writer(_dim(f"  generating {out_path} ...", out))
+    try:
+        credcap.main(argv)
+    except SystemExit:
+        pass
+    except Exception as exc:
+        writer(paint(f"  credcap failed: {exc}", "red", stream=out))
+        return None
+    return out_path
 
 
 def _yes(answer: str) -> bool:
