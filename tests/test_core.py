@@ -1077,26 +1077,35 @@ class TestCaptureHelpers(unittest.TestCase):
         through where it can be captured. start_ettercap must turn it on
         itself rather than silently leaving poisoning half-broken."""
         orig_enabled, orig_set = capture.ip_forward_enabled, capture.set_ip_forward
+        orig_which = capture.shutil.which
         written = []
         capture.ip_forward_enabled = lambda: False
         capture.set_ip_forward = lambda enabled: (written.append(enabled), True)[1]
+        # Hermetic: don't depend on ettercap actually being on PATH (CI's
+        # runner doesn't have it), or start_ettercap bails out on the
+        # "not installed" branch before ever reaching ip_forward.
+        capture.shutil.which = lambda name: "/usr/sbin/ettercap"
         try:
             status = capture.start_ettercap(
                 "wlan0", "10.0.0.1",
                 runner="true")  # "true" stands in for sudo: always succeeds
         finally:
             capture.ip_forward_enabled, capture.set_ip_forward = orig_enabled, orig_set
+            capture.shutil.which = orig_which
         self.assertTrue(status["ip_forward_was_on"] is False)
         self.assertEqual(written, [True])
 
     def test_start_ettercap_refuses_if_ip_forward_cannot_be_enabled(self):
         orig_enabled, orig_set = capture.ip_forward_enabled, capture.set_ip_forward
+        orig_which = capture.shutil.which
         capture.ip_forward_enabled = lambda: False
         capture.set_ip_forward = lambda enabled: False
+        capture.shutil.which = lambda name: "/usr/sbin/ettercap"
         try:
             status = capture.start_ettercap("wlan0", "10.0.0.1", runner="true")
         finally:
             capture.ip_forward_enabled, capture.set_ip_forward = orig_enabled, orig_set
+            capture.shutil.which = orig_which
         self.assertFalse(status["started"])
         self.assertIn("ip_forward", status["reason"])
 
