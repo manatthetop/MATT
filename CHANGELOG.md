@@ -6,6 +6,32 @@ All notable changes to MATT are recorded here. Format loosely follows
 ## [1.8.0] — 2026-11-12
 
 ### Added
+- **Context-seeded cracking** — before the configured wordlist, `--crack`
+  now generates and tries a small wordlist built from the target's own
+  context first (decoded usernames/hosts/emails, and `--ssid` for a WPA
+  crack), via `credcap.generate_contextual()`. A password built from the
+  target itself often cracks in this pass alone, well ahead of where it
+  would sit in a generic list.
+- **aircrack-ng fallback for a WPA hashcat OOM** — hashcat's `-m 22000`
+  kernel wants ~1.4 GB regardless of wordlist size, which a 4 GB box under
+  memory pressure can't always give it. If the raw `.cap` is available,
+  MATT now retries with aircrack-ng (a fraction of the memory) before
+  reporting a resource failure.
+- **Email/password pairing** — a bare email address seen in the clear is
+  now surfaced (as recon, not a credential), and upgraded to a real
+  credential pair if a plaintext password from the same payload/destination
+  gets cracked.
+
+### Fixed
+- **Every real WPA crack was silently reported "not in wordlist" even when
+  hashcat found the password.** hashcat's real `-m 22000` outfile never
+  echoes the original `WPA*02*...` candidate string back — it reformats a
+  cracked line as `hash:AP-MAC:client-MAC:ESSID:plaintext` — so the old
+  literal `candidate.lower()` outfile lookup could never match. Caught by
+  running a real captured handshake through `--crack` end to end (the
+  existing unit tests all mocked the outfile in the wrong format, so they
+  stayed green through this). `crack.py` now matches mode-22000 outfiles by
+  the (hash, AP MAC, client MAC) triple instead.
 - **Monitor-mode auto channel select** (`--monitor-setup`) — hops a
   monitor-capable adapter across the common 2.4/5 GHz channels, counts
   distinct transmitting devices on each, and locks onto the busiest one so
