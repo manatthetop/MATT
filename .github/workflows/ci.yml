@@ -80,7 +80,12 @@ jobs:
         shell: bash
         run: |
           choco install hashcat -y --no-progress
+          hashcat --version
           printf 'letmein\npassword123\nSummer2026!\n' > wl.txt
+          echo "e56f3bb5392369b6468e744ab1da078b" > direct_hash.txt
+          echo "---- direct hashcat invocation, matt's exact args ----"
+          hashcat -m 0 -a 0 --potfile-disable --quiet -o direct_out.txt direct_hash.txt wl.txt -O; echo "rc=$?"
+          echo "---- direct_out.txt ----"; cat direct_out.txt || true
           out="$(python matt.pyz --analyze-only examples/enterprise_capture.json --crack --wordlist wl.txt --no-banner)"
           echo "$out"
           grep -q 'CRACKED.*Summer2026!' <<<"$out" || { echo "::error::expected hashcat to actually recover Summer2026! on Windows"; exit 1; }
