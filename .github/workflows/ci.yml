@@ -42,6 +42,49 @@ jobs:
       - name: Run the test suite
         run: python -m unittest discover -s tests -v
 
+  windows-zipapp-smoke-test:
+    # Proves what install.ps1 actually delivers: build matt.pyz exactly like
+    # the Release workflow does, then run it for real on Windows (not just
+    # the unittest suite) against a sample capture report, covering the
+    # offline analyze/identify/crack paths install.ps1 advertises as working.
+    name: matt.pyz smoke test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the zipapp binary
+        shell: bash
+        run: |
+          rm -rf build && mkdir -p build
+          cp -r matt build/
+          printf 'import sys\nfrom matt.cli import main\nsys.exit(main())\n' > build/__main__.py
+          python -m zipapp build -o matt.pyz
+
+      - name: matt.pyz --version
+        run: python matt.pyz --version
+
+      - name: matt.pyz --help
+        run: python matt.pyz --help
+
+      - name: matt.pyz --analyze-only / --table / --identify (offline path)
+        run: |
+          python matt.pyz --analyze-only examples\enterprise_capture.json --table --no-banner
+          python matt.pyz --identify 5f4dcc3b5aa765d61d8327deb882cf99 --no-banner
+
+      - name: matt.pyz --crack (real hashcat path, no network)
+        shell: bash
+        run: |
+          choco install hashcat -y --no-progress
+          printf 'letmein\npassword123\nSummer2026!\n' > wl.txt
+          out="$(python matt.pyz --analyze-only examples/enterprise_capture.json --crack --wordlist wl.txt --no-banner)"
+          echo "$out"
+          grep -q 'CRACKED.*Summer2026!' <<<"$out" || { echo "::error::expected hashcat to actually recover Summer2026! on Windows"; exit 1; }
+
   windows:
     name: unittest (windows, py${{ matrix.python-version }})
     runs-on: windows-latest
