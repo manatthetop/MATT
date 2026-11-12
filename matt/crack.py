@@ -356,6 +356,9 @@ def _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
                 "Not enough allocatable device memory",
                 "No devices found/left", "Not enough allocatable"))
 
+        def _no_runtime(text):
+            return "No OpenCL, HIP or CUDA compatible platform found" in text
+
         # Retry once pinned to the CPU backend, which allocates more modestly.
         if _is_oom(out_text) and "-D" not in base and not _outfile_has_data(outfile):
             proc, err = _run(base + ["-D", "1"])
@@ -388,6 +391,18 @@ def _crack_into(items, tmp, hashcat, wordlist, runner, timeout, extra_args,
                     notes[g["candidate"].lower()] = (
                         "hashcat ran out of memory on this machine -- crack on a "
                         "host with more RAM or a GPU")
+            elif _no_runtime(out_text):
+                # hashcat found no OpenCL/CUDA/HIP platform at all -- there is
+                # no GPU driver or CPU OpenCL runtime installed on this
+                # machine, so hashcat never even started a kernel. Distinct
+                # from an exhausted wordlist (and from the generic "hashcat
+                # exited N" below), so the operator knows a driver install is
+                # what's missing, not a bigger wordlist.
+                for g in group:
+                    notes[g["candidate"].lower()] = (
+                        "no OpenCL/CUDA/HIP runtime found on this machine -- "
+                        "install a GPU driver (or the Intel/AMD CPU OpenCL "
+                        "runtime) to crack here")
             elif rc not in (None, 0, 1):
                 for g in group:
                     notes.setdefault(g["candidate"].lower(),
