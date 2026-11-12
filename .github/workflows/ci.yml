@@ -89,6 +89,10 @@ jobs:
           export PATH="$(dirname "$real_hashcat"):$PATH"
           hashcat --version
           printf 'letmein\npassword123\nSummer2026!\n' > wl.txt
+          echo "---- direct, verbose, no --quiet, from hashcat's own dir ----"
+          echo "e56f3bb5392369b6468e744ab1da078b" > direct_hash.txt
+          (cd "$(dirname "$real_hashcat")" && ./hashcat.exe -m 0 -a 0 --potfile-disable -o "$OLDPWD/direct_out.txt" "$OLDPWD/direct_hash.txt" "$OLDPWD/wl.txt"); echo "direct rc=$?"
+          cat direct_out.txt 2>/dev/null || echo "(no direct_out.txt)"
           out="$(python matt.pyz --analyze-only examples/enterprise_capture.json --crack --wordlist wl.txt --no-banner)"
           echo "$out"
           grep -q 'CRACKED.*Summer2026!' <<<"$out" || { echo "::error::expected hashcat to actually recover Summer2026! on Windows"; exit 1; }
