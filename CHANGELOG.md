@@ -3,6 +3,43 @@
 All notable changes to MATT are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [1.8.0] — 2026-11-12
+
+### Added
+- **Monitor-mode auto channel select** (`--monitor-setup`) — hops a
+  monitor-capable adapter across the common 2.4/5 GHz channels, counts
+  distinct transmitting devices on each, and locks onto the busiest one so
+  it's ready for passive capture in Wireshark; `--monitor-restore` undoes it.
+  Shows a live progress bar while scanning. `wifi.best_channel_by_activity()`
+  / `wifi.dwell_scan()` are the building blocks (tshark-based device
+  counting, with a tcpdump frame-count fallback).
+- **Menu redesign** — the interactive menu is now a short list of categories
+  (Capture & analyze / Poison & intercept / Monitor mode / Crack & identify /
+  Live dashboard / About); picking one opens a submenu of the actual actions.
+  A blank Enter in any submenu runs the item marked "(recommended)", so the
+  common case is one keystroke. The menu now also exposes LLMNR/NBT-NS
+  poisoning, monitor-mode setup, the live dashboard, and `--identify` — all
+  previously CLI-flag-only, not reachable from the menu.
+- **Progress bar** (`ui.progress_bar()`) — plain-ASCII `[####----] NN%`,
+  used by the channel scan and reusable anywhere else a known-fraction wait
+  needs to show it's alive.
+
+### Fixed
+- **ARP-poison MITM now enables `net.ipv4.ip_forward`** before starting
+  ettercap, and restores its prior value when poisoning stops. Without this,
+  a poisoned victim's traffic is dropped at this host instead of passing
+  through where it can be captured — the kernel does not forward it by
+  default, so the "MITM" silently became a denial of service with nothing
+  captured. `capture.start_ettercap()` now also refuses to start (with a
+  clear reason) if it cannot enable forwarding.
+- **Menu actions other than analyze/live capture were silently broken** —
+  `_parse_and_run()` (what the menu's dispatch calls) only ever checked
+  `--analyze-only` vs a live capture, never `--wpa`/`--llmnr`/`--dashboard`/
+  `--identify`/`--monitor-setup`. Picking "Wi-Fi handshake capture" from the
+  menu, for example, built the right `--wpa ...` argv but it then fell
+  through to a plain live ARP capture that ignored those flags. Both the menu
+  dispatch and `main()` now share one `_route()`.
+
 ## [1.7.0] — 2026-11-11
 
 ### Added

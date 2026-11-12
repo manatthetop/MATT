@@ -173,6 +173,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="deauth frames to send (0 = continuous; default 5)")
     wifi.add_argument("--wpa-out", default="matt-wpa.22000",
                       help="where the 22000 hash is written (default: matt-wpa.22000)")
+    wifi.add_argument("--monitor-setup", action="store_true",
+                      help="put --iface into monitor mode, ready for passive "
+                           "capture in Wireshark; auto-picks the busiest "
+                           "channel (most active devices) by scanning, unless "
+                           "--channel names one")
+    wifi.add_argument("--monitor-restore", action="store_true",
+                      help="put --iface back into managed mode")
+    wifi.add_argument("--scan-seconds", type=float, default=1.5,
+                      help="dwell time per channel for --monitor-setup's "
+                           "auto channel scan (default: 1.5)")
     wifi.add_argument("--llmnr", action="store_true",
                       help="LLMNR/NBT-NS poisoning: answer name queries with "
                            "--our-ip so auth is funnelled here (root + authorization)")
@@ -374,6 +384,104 @@ def run_wpa(args) -> int:
     else:
         print(_c("  no handshake captured -- try again or raise --deauth.", "dim"))
     return EXIT_OK
+
+
+def run_monitor_restore(args) -> int:
+    """Put --iface back into managed mode (undoes --monitor-setup)."""
+    from . import wifi
+    if not args.iface:
+        sys.stderr.write("matt: --monitor-restore needs --iface\n")
+        return EXIT_CONFIG
+    if args.dry_run:
+        print(_c("  dry run -- would restore managed mode on %s." % args.iface, "dim"))
+        return EXIT_OK
+    try:
+        _capture.require_root(args.euid)
+    except PermissionError as exc:
+        sys.stderr.write("matt: refusing to run: %s\n" % exc)
+        return EXIT_CONFIG
+    for cmd in wifi.monitor_down(args.iface):
+        subprocess.run(cmd, check=False)
+    print(_c("  %s is back in managed mode." % args.iface, "green"))
+    return EXIT_OK
+
+
+def run_monitor_setup(args) -> int:
+    """Put --iface into monitor mode, ready for passive capture in Wireshark.
+    With no --channel, scans the common channels and auto-picks the busiest
+    one (most distinct devices seen transmitting) -- this is the "auto select
+    the best channel" path: no guessing, no manually running iw by hand."""
+    from . import wifi
+    if not args.iface:
+        sys.stderr.write("matt: --monitor-setup needs --iface (the "
+                         "monitor-capable adapter)\n")
+        return EXIT_CONFIG
+    missing = [t for t in ("iw", "ip") if not wifi._which_incl_sbin(t)]
+    if missing:
+        sys.stderr.write("matt: missing tools: %s\n" % ", ".join(missing))
+        return EXIT_CONFIG
+
+    channel = args.channel
+    if args.dry_run:
+        if channel:
+            print(_c("  dry run -- would set %s to monitor mode on channel %s."
+                     % (args.iface, channel), "dim"))
+        else:
+            print(_c("  dry run -- would scan the common channels on %s and "
+                     "lock to the busiest one." % args.iface, "dim"))
+        return EXIT_OK
+    try:
+        _capture.require_root(args.euid)
+    except PermissionError as exc:
+        sys.stderr.write("matt: refusing to run: %s\n" % exc)
+        return EXIT_CONFIG
+
+    if not channel:
+        total = len(wifi.DEFAULT_SCAN_CHANNELS)
+
+        def on_progress(i, n, ch):
+            bar = _c(_ui_progress_bar(i / n), "cyan")
+            line = "  scanning for the busiest channel  %s  ch %-4s (%d/%d)" % (
+                bar, ch, i, n)
+            if sys.stdout.isatty():
+                sys.stdout.write("\r" + line)
+                sys.stdout.flush()
+            else:
+                print(line)
+
+        ranked = wifi.best_channel_by_activity(args.iface, dwell=args.scan_seconds,
+                                               on_progress=on_progress)
+        if sys.stdout.isatty():
+            sys.stdout.write("\n")
+        if not ranked or not any(r["devices"] for r in ranked):
+            print(_c("  no activity detected on any scanned channel -- is the "
+                     "adapter in range of any Wi-Fi traffic?", "red"))
+            return EXIT_LIVE
+        print(_c("  channel activity (busiest first):", "bold"))
+        for r in ranked[:8]:
+            print("    ch %-4s  devices %-4d  frames %-5d"
+                  % (r["channel"], r["devices"], r["frames"]))
+        channel = ranked[0]["channel"]
+        print(_c("  auto-selected channel %s (%d active device(s))"
+                 % (channel, ranked[0]["devices"]), "green", "bold"))
+        for cmd in wifi.monitor_up(args.iface):
+            subprocess.run(cmd, check=False)
+        subprocess.run(wifi.set_channel(args.iface, channel), check=False)
+    else:
+        for cmd in wifi.monitor_up(args.iface):
+            subprocess.run(cmd, check=False)
+        subprocess.run(wifi.set_channel(args.iface, channel), check=False)
+
+    print(_c("  %s is now in MONITOR mode on channel %s -- ready for Wireshark."
+             % (args.iface, channel), "green", "bold"))
+    print(_c("  restore managed mode later with: matt --monitor-restore --iface %s"
+             % args.iface, "dim"))
+    return EXIT_OK
+
+
+def _ui_progress_bar(fraction):
+    from . import ui
+    return ui.progress_bar(fraction)
 
 
 def _print_dashboard_rows(rows) -> None:
@@ -850,12 +958,13 @@ def run_live(args, parser) -> int:
     clients = _capture.discover_clients()
     neighbors = _capture.neighbor_table()   # ip -> mac, for device-name labelling
     poison = {"skipped": True, "reason": "--no-poison"}
-    pid = None
     if not args.no_poison:
         poison = _capture.start_ettercap(args.iface, gateway)
-        pid = poison.get("pid")
         if not poison.get("started"):
             sys.stderr.write(f"matt: ettercap not running: {poison['reason']}\n")
+        elif poison.get("ip_forward_enabled"):
+            print(_c("  enabled net.ipv4.ip_forward (needed so poisoned traffic "
+                     "actually passes through this host)", "dim"))
 
     t0 = time.monotonic()
     try:
@@ -863,8 +972,8 @@ def run_live(args, parser) -> int:
             args.iface, duration=args.duration, capture_tool=args.capture_tool,
             runner=args.runner, max_packets=args.max_packets)
     finally:
-        if pid:
-            _capture.stop_daemon(pid)
+        if poison.get("pid"):
+            _capture.stop_poison(poison)
 
     payloads = sniff["payloads"]
     hosts = {"the wire": {"payloads": payloads}}
@@ -937,14 +1046,39 @@ def run_live(args, parser) -> int:
     return EXIT_OK
 
 
+def _route(args, parser) -> int:
+    """Send already-parsed args to the right handler -- the single path both
+    ``main()`` and the menu's ``dispatch`` go through, so a menu action can
+    never silently fall through to the wrong runner (this used to happen: the
+    menu's WPA/LLMNR/monitor-setup/dashboard/identify actions built the right
+    argv, but the dispatch path only ever checked --analyze-only vs a live
+    capture, so picking them from the menu quietly ran a plain ARP capture
+    with the extra flags ignored instead of what the menu said it would do)."""
+    if args.identify is not None:
+        return _do_identify(args.identify)
+    if args.dashboard is not None:
+        return run_dashboard(args)
+    if args.wpa:
+        return run_wpa(args)
+    if args.monitor_setup:
+        return run_monitor_setup(args)
+    if args.monitor_restore:
+        return run_monitor_restore(args)
+    if args.llmnr:
+        return run_llmnr(args)
+    if args.watch:
+        return run_watch(args)
+    if args.analyze_only:
+        return run_offline(args, parser)
+    return run_live(args, parser)
+
+
 def _parse_and_run(argv, parser=None) -> int:
     """Parse an argv list and run it -- the single path the menu and the flags
     both go through, so the two can never drift apart."""
     parser = parser or build_parser()
     args = parser.parse_args(argv)
-    if args.analyze_only:
-        return run_offline(args, parser)
-    return run_live(args, parser)
+    return _route(args, parser)
 
 
 def main(argv=None) -> int:
@@ -952,21 +1086,6 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     args = parser.parse_args(argv)
-
-    if args.identify is not None:
-        return _do_identify(args.identify)
-
-    if args.dashboard is not None:
-        return run_dashboard(args)
-
-    if args.wpa:
-        return run_wpa(args)
-
-    if args.llmnr:
-        return run_llmnr(args)
-
-    if args.watch:
-        return run_watch(args)
 
     # No arguments in a real terminal -> the friendly menu. Explicit --menu/-i
     # forces it even with other flags present. A piped or scripted run (no tty)
@@ -983,9 +1102,7 @@ def main(argv=None) -> int:
         parser.print_help()
         return EXIT_OK
 
-    if args.analyze_only:
-        return run_offline(args, parser)
-    return run_live(args, parser)
+    return _route(args, parser)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,14 @@ __all__ = [
     "TOOLS", "missing_tools", "monitor_up", "monitor_down", "set_channel",
     "scan_cmd", "parse_scan", "channel_for", "scan",
     "capture", "deauth", "convert_22000", "plan", "orchestrate",
+    "DEFAULT_SCAN_CHANNELS", "dwell_scan", "best_channel_by_activity",
 ]
+
+# The channels worth dwelling on for a quick busiest-channel scan: the three
+# non-overlapping 2.4 GHz channels plus the common 5 GHz UNII-1/UNII-3 ones.
+# Not exhaustive (a full 1-165 sweep would take far longer for little extra
+# signal), but it is where the overwhelming majority of real devices sit.
+DEFAULT_SCAN_CHANNELS = [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]
 
 # The external tools this pipeline needs, and what each is for. Monitor mode is
 # driven with iw/ip (in place, no renamed *mon interface) rather than airmon-ng:
@@ -221,6 +228,84 @@ def plan(iface: str, bssid: str, channel, client: str = None, count: int = 5,
     steps.append(("convert", convert_22000(prefix + "-01.cap", out)))
     steps += [("monitor off", cmd) for cmd in monitor_down(iface)]
     return steps
+
+
+def dwell_scan(iface: str, channel, seconds: float = 1.5, runner=None,
+              capture_runner=None, which=None) -> dict:
+    """Lock a monitor-mode ``iface`` to ``channel`` and count 802.11 frames and
+    distinct transmitting devices seen over ``seconds`` -- a direct measure of
+    how busy that channel actually is, not just how many APs advertise on it.
+
+    Prefers tshark (reads the wlan.sa field, so devices are counted exactly);
+    falls back to a plain tcpdump frame count (via the ``timeout`` coreutil,
+    since tcpdump has no built-in duration flag) when tshark is missing, with
+    devices reported equal to frames since MACs are not parsed in that path.
+    Returns ``{"channel", "frames", "devices"}`` either way, including an
+    all-zero result if neither tool is available or the run itself errors.
+    """
+    runner = runner or (lambda cmd: subprocess.run(cmd, capture_output=True,
+                                                    text=True, timeout=30, check=False))
+    capture_runner = capture_runner or (lambda cmd, timeout: subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout, check=False))
+    which = which or _which_incl_sbin
+    runner(set_channel(iface, channel))
+    tshark = which("tshark")
+    if tshark:
+        try:
+            res = capture_runner(
+                [tshark, "-i", iface, "-a", "duration:%s" % seconds,
+                 "-T", "fields", "-e", "wlan.sa"], seconds + 15)
+        except subprocess.SubprocessError:
+            return {"channel": channel, "frames": 0, "devices": 0}
+        macs = [m for m in (getattr(res, "stdout", "") or "").split()
+                if m and m != "ff:ff:ff:ff:ff:ff"]
+        return {"channel": channel, "frames": len(macs), "devices": len(set(macs))}
+    tcpdump = which("tcpdump")
+    timeout_bin = which("timeout")
+    if tcpdump and timeout_bin:
+        dwell = max(1, int(round(seconds)))
+        try:
+            res = capture_runner(
+                [timeout_bin, str(dwell), tcpdump, "-i", iface, "-nn"], seconds + 15)
+        except subprocess.SubprocessError:
+            return {"channel": channel, "frames": 0, "devices": 0}
+        text = (getattr(res, "stdout", "") or "") + (getattr(res, "stderr", "") or "")
+        frames = sum(1 for ln in text.splitlines() if ln.strip())
+        return {"channel": channel, "frames": frames, "devices": frames}
+    return {"channel": channel, "frames": 0, "devices": 0}
+
+
+def best_channel_by_activity(iface: str, channels=None, dwell: float = 1.5,
+                             on_progress=None, runner=None, capture_runner=None,
+                             which=None) -> list:
+    """Hop ``iface`` across ``channels`` (default DEFAULT_SCAN_CHANNELS),
+    dwelling on each for ``dwell`` seconds, and rank them by distinct devices
+    seen transmitting -- the busiest channel is the best pick for a
+    monitor-mode adapter doing passive sniffing (the most traffic to see).
+
+    Puts ``iface`` into monitor mode for the scan and always restores managed
+    mode afterwards, even on error. ``on_progress(i, total, channel)`` fires
+    right before each dwell, so a caller can render a progress bar. Returns a
+    list of ``{"channel","frames","devices"}``, busiest first.
+    """
+    channels = list(channels or DEFAULT_SCAN_CHANNELS)
+    runner = runner or (lambda cmd: subprocess.run(cmd, capture_output=True,
+                                                    text=True, timeout=30, check=False))
+    for cmd in monitor_up(iface):
+        runner(cmd)
+    results = []
+    try:
+        total = len(channels)
+        for i, ch in enumerate(channels, 1):
+            if on_progress:
+                on_progress(i, total, ch)
+            results.append(dwell_scan(iface, ch, seconds=dwell, runner=runner,
+                                      capture_runner=capture_runner, which=which))
+    finally:
+        for cmd in monitor_down(iface):
+            runner(cmd)
+    results.sort(key=lambda r: (r["devices"], r["frames"]), reverse=True)
+    return results
 
 
 def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int = 5,

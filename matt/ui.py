@@ -18,7 +18,7 @@ import re
 import sys
 
 __all__ = ["banner", "render_header", "run_menu", "paint", "color_key",
-           "red", "green", "cyan", "yellow", "bold", "dim"]
+           "red", "green", "cyan", "yellow", "bold", "dim", "progress_bar"]
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -118,6 +118,15 @@ def _dim(text, stream):
     return paint(text, "dim", stream=stream)
 
 
+def progress_bar(fraction: float, width: int = 24) -> str:
+    """A ``[####----] NN%`` bar for a known-fraction progress display (e.g.
+    "channel 3 of 11 scanned"). Plain ASCII so it is identical on a tty or a
+    captured/piped stream -- unlike colour, a bar is useful either way."""
+    fraction = 0.0 if fraction < 0 else (1.0 if fraction > 1 else fraction)
+    filled = int(round(width * fraction))
+    return "[%s%s] %3d%%" % ("#" * filled, "-" * (width - filled), int(fraction * 100))
+
+
 def color_key(stream=None) -> str:
     """A one-line legend for the colours the tool uses."""
     stream = stream or sys.stdout
@@ -162,15 +171,62 @@ def _term_width(stream) -> int:
 # the menu
 # --------------------------------------------------------------------------
 
-_MENU = [
-    ("1", "Analyze a capture file", "offline, no root, zero network, zero tokens"),
-    ("2", "Live passive capture", "sniff an interface only -- needs root"),
-    ("3", "Live MITM capture", "ARP-poison + sniff -- needs root + authorization"),
-    ("4", "Crack a capture with hashcat", "recover plaintext from the findings -- needs hashcat"),
-    ("5", "Wi-Fi handshake capture", "scan, auto-tune, deauth + capture -> hashcat 22000 -- needs root"),
+_CATEGORIES = [
+    ("1", "Capture & analyze",
+     "read a report offline, or sniff live (passive or ARP-poison MITM)"),
+    ("2", "Poison & intercept",
+     "ARP MITM, LLMNR/NBT-NS poisoning, Wi-Fi WPA handshake capture"),
+    ("3", "Monitor mode (Wireshark)",
+     "auto-pick the busiest channel and set an adapter to monitor mode"),
+    ("4", "Crack & identify",
+     "run hashcat on a capture, or identify/reverse one hash"),
+    ("5", "Live dashboard",
+     "watch findings update, in the terminal or a local web page"),
     ("6", "About / how it works", ""),
     ("q", "Quit", ""),
 ]
+
+# category key -> ordered (action key, title, hint, recommended) tuples. The
+# first "recommended" item is what a blank Enter picks, so the common case in
+# each submenu is one keystroke.
+_SUBMENUS = {
+    "1": [
+        ("1", "Analyze a capture file",
+         "offline, no root, zero network, zero tokens", True),
+        ("2", "Live passive capture",
+         "sniff an interface only -- needs root", False),
+        ("3", "Live ARP-poison MITM capture",
+         "ARP-poison + sniff -- needs root + authorization", False),
+    ],
+    "2": [
+        ("1", "ARP-poison MITM capture",
+         "poison + sniff -- needs root + authorization", True),
+        ("2", "LLMNR / NBT-NS poisoning",
+         "answer name queries so auth comes here -- needs root + authorization",
+         False),
+        ("3", "Wi-Fi WPA/WPA2 handshake capture",
+         "scan, auto-tune, deauth + capture -> hashcat 22000 -- needs root", False),
+    ],
+    "3": [
+        ("1", "Auto-pick busiest channel + monitor mode",
+         "scans the common channels, locks to the one with the most "
+         "active devices -- needs root", True),
+        ("2", "Monitor mode on a specific channel",
+         "you name the channel -- needs root", False),
+        ("3", "Restore managed mode",
+         "undo monitor mode on an adapter -- needs root", False),
+    ],
+    "4": [
+        ("1", "Crack a capture with hashcat",
+         "recover plaintext from the findings -- needs hashcat", True),
+        ("2", "Identify / reverse a hash",
+         "name its type + hashcat mode, try an instant reversal", False),
+    ],
+    "5": [
+        ("1", "Terminal dashboard", "live findings, redraws in place", True),
+        ("2", "Web dashboard", "serves a local page instead", False),
+    ],
+}
 
 
 def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
@@ -181,6 +237,11 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
     and ``writer`` are injectable (default: ``input`` / ``print``) so the whole
     loop is testable without a real terminal, and ``clear`` likewise.
 
+    Each top-level pick is a category; picking one opens a submenu of the
+    actual actions, where a blank answer (just Enter) runs whichever one is
+    marked "(recommended)" -- so the common case is one keystroke per menu,
+    not a remembered number.
+
     Returns the exit code of the last action, or 0 on a clean quit.
     """
     reader = reader or (lambda prompt="": input(prompt))
@@ -189,14 +250,14 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
     if clear is None:
         clear = lambda: _clear(out)
 
-    accent = {"1": "green", "2": "cyan", "3": "red", "4": "red", "5": "red",
+    accent = {"1": "green", "2": "red", "3": "cyan", "4": "red", "5": "cyan",
               "6": "cyan", "q": "dim"}
     last_code = 0
     while True:
         clear()
         writer(render_header(out))
         writer("")
-        for key, title, hint in _MENU:
+        for key, title, hint in _CATEGORIES:
             acc = accent.get(key, "cyan")
             keytag = paint(f"[{key}]", acc, "bold", stream=out)
             label = f"  {keytag}  {paint(title, 'bold', stream=out)}"
@@ -220,27 +281,93 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
             writer(render_header(out))
             writer("")
 
-        if choice == "1":
-            enter()
-            last_code = _do_analyze(parser, dispatch, reader, writer, out)
-        elif choice == "2":
-            enter()
-            last_code = _do_live(parser, dispatch, reader, writer, out, poison=False)
-        elif choice == "3":
-            enter()
-            last_code = _do_live(parser, dispatch, reader, writer, out, poison=True)
-        elif choice == "4":
-            enter()
-            last_code = _do_analyze(parser, dispatch, reader, writer, out, crack=True)
-        elif choice == "5":
-            enter()
-            last_code = _do_wpa(parser, dispatch, reader, writer, out)
-        elif choice == "6":
+        if choice == "6":
             enter()
             _about(writer, out)
-        else:
+            _pause(reader, writer)
+            continue
+
+        if choice not in _SUBMENUS:
             writer(paint(f"  not a choice: {choice!r}", "red", stream=out))
+            _pause(reader, writer)
+            continue
+
+        pick = _run_submenu(choice, reader, writer, out)
+        if pick is None:          # "back" -- no action, straight to top again
+            continue
+
+        enter()
+        last_code = _dispatch_action(choice, pick, parser, dispatch, reader, writer, out)
         _pause(reader, writer)
+
+
+def _run_submenu(category: str, reader, writer, out) -> "str | None":
+    """Show ``category``'s submenu and return the chosen action key, or None
+    for "back". A blank answer picks whichever item is marked recommended."""
+    items = _SUBMENUS[category]
+    default_key = next((k for k, _t, _h, rec in items if rec), items[0][0])
+    title = next(t for k, t, _h in _CATEGORIES if k == category)
+    while True:
+        writer(paint(f"  {title}", "bold", stream=out))
+        writer("")
+        for key, label, hint, recommended in items:
+            keytag = paint(f"[{key}]", "cyan", "bold", stream=out)
+            rec = (paint("  (recommended -- press Enter)", "green", stream=out)
+                   if recommended else "")
+            line = f"  {keytag}  {paint(label, 'bold', stream=out)}{rec}"
+            writer(line if not hint
+                   else f"{line}\n        {paint(hint, 'dim', stream=out)}")
+        writer(f"  {paint('[b]', 'dim', stream=out)}  Back")
+        writer("")
+        try:
+            answer = reader(paint("matt> ", "green", "bold", stream=out)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer == "":
+            return default_key
+        if answer in ("b", "back"):
+            return None
+        if any(answer == key for key, *_rest in items):
+            return answer
+        writer(paint(f"  not a choice: {answer!r}", "red", stream=out))
+
+
+def _dispatch_action(category, pick, parser, dispatch, reader, writer, out) -> int:
+    """The category+pick -> actual menu action. One place, so adding an action
+    is adding one line here plus one line in _SUBMENUS, nowhere else."""
+    if category == "1":
+        if pick == "1":
+            return _do_analyze(parser, dispatch, reader, writer, out)
+        if pick == "2":
+            return _do_live(parser, dispatch, reader, writer, out, poison=False)
+        if pick == "3":
+            return _do_live(parser, dispatch, reader, writer, out, poison=True)
+    elif category == "2":
+        if pick == "1":
+            return _do_live(parser, dispatch, reader, writer, out, poison=True)
+        if pick == "2":
+            return _do_llmnr(parser, dispatch, reader, writer, out)
+        if pick == "3":
+            return _do_wpa(parser, dispatch, reader, writer, out)
+    elif category == "3":
+        if pick == "1":
+            return _do_monitor_setup(parser, dispatch, reader, writer, out, auto=True)
+        if pick == "2":
+            return _do_monitor_setup(parser, dispatch, reader, writer, out, auto=False)
+        if pick == "3":
+            return _do_monitor_restore(parser, dispatch, reader, writer, out)
+    elif category == "4":
+        if pick == "1":
+            return _do_analyze(parser, dispatch, reader, writer, out, crack=True)
+        if pick == "2":
+            return _do_identify(parser, dispatch, reader, writer, out)
+    elif category == "5":
+        if pick == "1":
+            return _do_dashboard(parser, dispatch, reader, writer, out, web=False)
+        if pick == "2":
+            return _do_dashboard(parser, dispatch, reader, writer, out, web=True)
+    return 0  # pragma: no cover -- unreachable: _run_submenu only returns
+              # keys that exist in the category's own list
 
 
 # --------------------------------------------------------------------------
@@ -389,6 +516,93 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     return code
 
 
+def _do_llmnr(parser, dispatch, reader, writer, out) -> int:
+    """LLMNR/NBT-NS poisoning: answer every name query on the segment with our
+    address, so the next auth attempt lands here for MATT's NetNTLMv2 decoder."""
+    ifaces = _interfaces()
+    if ifaces:
+        writer(_dim("  interfaces: " + ", ".join(ifaces), out))
+    iface = reader("  interface to answer on [wlan0]: ").strip() or "wlan0"
+    duration = reader("  seconds to poison [30]: ").strip() or "30"
+    our_ip = reader("  address to answer queries with [auto-detect]: ").strip()
+
+    argv = ["--llmnr", "--iface", iface, "--duration", duration, "--no-banner"]
+    if our_ip:
+        argv += ["--our-ip", our_ip]
+    writer("")
+    writer(paint("  LLMNR/NBT-NS poisoning answers OTHER hosts' name lookups "
+                 "with this address.", "red", "bold", stream=out))
+    ok = reader(paint("  type YES if you hold written authorization: ",
+                      "red", stream=out)).strip()
+    if ok != "YES":
+        writer(paint("  not confirmed -- nothing was run.", "red", stream=out))
+        return 2
+    argv.append("--i-have-written-authorization")
+    writer("")
+    return dispatch(argv)
+
+
+def _do_monitor_setup(parser, dispatch, reader, writer, out, auto: bool) -> int:
+    """Put an adapter into monitor mode, ready for Wireshark. ``auto`` scans
+    the common channels and locks to the busiest one; otherwise the operator
+    names the channel directly."""
+    ifaces = _interfaces()
+    if ifaces:
+        writer(_dim("  interfaces: " + ", ".join(ifaces), out))
+    default_if = ifaces[-1] if len(ifaces) > 1 else (ifaces[0] if ifaces else "wlan1")
+    iface = reader(f"  monitor-capable adapter [{default_if}]: ").strip() or default_if
+
+    argv = ["--monitor-setup", "--iface", iface, "--no-banner"]
+    if auto:
+        writer(_dim(f"  scanning for the busiest channel on {iface} ...", out))
+    else:
+        channel = reader("  channel: ").strip()
+        if not channel:
+            writer(paint("  no channel entered.", "red", stream=out))
+            return 2
+        argv += ["--channel", channel]
+    writer("")
+    return dispatch(argv)
+
+
+def _do_monitor_restore(parser, dispatch, reader, writer, out) -> int:
+    """Put an adapter back into managed mode (undoes monitor-mode setup)."""
+    ifaces = _interfaces()
+    if ifaces:
+        writer(_dim("  interfaces: " + ", ".join(ifaces), out))
+    default_if = ifaces[-1] if len(ifaces) > 1 else (ifaces[0] if ifaces else "wlan1")
+    iface = reader(f"  adapter to restore [{default_if}]: ").strip() or default_if
+    argv = ["--monitor-restore", "--iface", iface, "--no-banner"]
+    writer("")
+    return dispatch(argv)
+
+
+def _do_identify(parser, dispatch, reader, writer, out) -> int:
+    """Identify a single hash's likely type(s) + hashcat mode, and try an
+    instant reversal against the built-in common-password table."""
+    value = reader("  hash to identify (paste it): ").strip()
+    if not value:
+        writer(paint("  nothing entered.", "red", stream=out))
+        return 2
+    writer("")
+    return dispatch(["--identify", value, "--no-banner"])
+
+
+def _do_dashboard(parser, dispatch, reader, writer, out, web: bool) -> int:
+    """Live findings dashboard: terminal (redraws in place) or a local web
+    page. Runs until Ctrl-C, same as from the command line."""
+    directory = reader("  directory to watch for findings [.]: ").strip() or "."
+    argv = ["--dashboard", directory, "--no-banner"]
+    if web:
+        argv.append("--web")
+        port = reader("  port [8899]: ").strip()
+        if port:
+            argv += ["--dashboard-port", port]
+    writer("")
+    writer(_dim("  Ctrl-C stops the dashboard and returns here.", out))
+    return dispatch(argv)
+
+
 def _about(writer, out) -> None:
     writer("")
     for line in (
@@ -405,6 +619,13 @@ def _about(writer, out) -> None:
         "",
         "It never claims to have cracked a password. It says 'candidate recovered,",
         "hand it to hashcat', because that is what actually happened.",
+        "",
+        "Everything the flags can do is in this menu too, grouped by category:",
+        "  capture & analyze   ARP MITM / passive capture, offline analysis",
+        "  poison & intercept  ARP MITM, LLMNR/NBT-NS poisoning, WPA handshakes",
+        "  monitor mode        auto-pick the busiest channel for Wireshark",
+        "  crack & identify    hashcat, or identify/reverse a single hash",
+        "  live dashboard      terminal or local web page",
         "",
         _dim("Only run this against a network you are authorized to test.", out),
     ):

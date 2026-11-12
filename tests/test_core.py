@@ -1070,6 +1070,65 @@ class TestCaptureHelpers(unittest.TestCase):
         self.assertFalse(capture.start_ettercap("wlan0", "10.0.0.1",
                                                 dry_run=True)["started"])
 
+    def test_start_ettercap_enables_ip_forward_when_off(self):
+        """Without net.ipv4.ip_forward=1, ARP-poisoned victims just lose
+        connectivity (dropped at this host) instead of their traffic passing
+        through where it can be captured. start_ettercap must turn it on
+        itself rather than silently leaving poisoning half-broken."""
+        orig_enabled, orig_set = capture.ip_forward_enabled, capture.set_ip_forward
+        written = []
+        capture.ip_forward_enabled = lambda: False
+        capture.set_ip_forward = lambda enabled: (written.append(enabled), True)[1]
+        try:
+            status = capture.start_ettercap(
+                "wlan0", "10.0.0.1",
+                runner="true")  # "true" stands in for sudo: always succeeds
+        finally:
+            capture.ip_forward_enabled, capture.set_ip_forward = orig_enabled, orig_set
+        self.assertTrue(status["ip_forward_was_on"] is False)
+        self.assertEqual(written, [True])
+
+    def test_start_ettercap_refuses_if_ip_forward_cannot_be_enabled(self):
+        orig_enabled, orig_set = capture.ip_forward_enabled, capture.set_ip_forward
+        capture.ip_forward_enabled = lambda: False
+        capture.set_ip_forward = lambda enabled: False
+        try:
+            status = capture.start_ettercap("wlan0", "10.0.0.1", runner="true")
+        finally:
+            capture.ip_forward_enabled, capture.set_ip_forward = orig_enabled, orig_set
+        self.assertFalse(status["started"])
+        self.assertIn("ip_forward", status["reason"])
+
+    def test_start_ettercap_leaves_ip_forward_alone_when_already_on(self):
+        orig_enabled, orig_set = capture.ip_forward_enabled, capture.set_ip_forward
+        written = []
+        capture.ip_forward_enabled = lambda: True
+        capture.set_ip_forward = lambda enabled: written.append(enabled)
+        try:
+            status = capture.start_ettercap("wlan0", "10.0.0.1", runner="true")
+        finally:
+            capture.ip_forward_enabled, capture.set_ip_forward = orig_enabled, orig_set
+        self.assertEqual(written, [], "must not touch ip_forward if it was already on")
+        self.assertFalse(status["ip_forward_enabled"])
+
+    def test_stop_poison_restores_ip_forward_only_if_matt_enabled_it(self):
+        written = []
+        orig_set = capture.set_ip_forward
+        capture.set_ip_forward = lambda enabled: written.append(enabled)
+        orig_stop_daemon = capture.stop_daemon
+        capture.stop_daemon = lambda pid: None
+        try:
+            capture.stop_poison({"pid": 123, "ip_forward_enabled": True,
+                                 "ip_forward_was_on": False})
+            self.assertEqual(written, [False])
+            written.clear()
+            capture.stop_poison({"pid": 123, "ip_forward_enabled": False,
+                                 "ip_forward_was_on": True})
+            self.assertEqual(written, [], "must not touch it if MATT didn't enable it")
+        finally:
+            capture.set_ip_forward = orig_set
+            capture.stop_daemon = orig_stop_daemon
+
     def test_hexdump_payloads_become_candidates(self):
         """A tcpdump hex row is 16 bytes, so the ASCII is what gets recovered.
 
@@ -1381,6 +1440,36 @@ class TestCli(TempDirCase):
         self.assertIn("MD5", out)
         self.assertIn("password", out)   # reversed
 
+    def test_parse_and_run_routes_identify_not_through_live_capture(self):
+        """_parse_and_run() is what the interactive menu's dispatch() calls
+        (main() has its own, separate routing). It used to only ever check
+        --analyze-only vs a live capture, so a menu action building any other
+        flag combination (--identify, --wpa, --llmnr, --monitor-setup,
+        --dashboard) silently fell through to run_live instead of its real
+        handler. Regression guard: --identify through this path must print
+        the identify output, not attempt (and fail) a live capture."""
+        from matt import cli
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli._parse_and_run(
+                ["--identify", "5f4dcc3b5aa765d61d8327deb882cf99"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("MD5", out.getvalue())
+        self.assertIn("password", out.getvalue())
+
+    def test_parse_and_run_routes_wpa_not_through_live_capture(self):
+        from matt import cli
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli._parse_and_run(
+                ["--wpa", "--iface", "wlan1", "--bssid", "aa:bb:cc:dd:ee:ff",
+                 "--channel", "6", "--dry-run", "--no-banner"])
+        self.assertEqual(code, 0, err.getvalue())
+        # run_wpa's dry-run plan mentions the WPA pipeline stages; run_live's
+        # dry-run output (the old, wrong destination) never would.
+        self.assertIn("monitor on", out.getvalue())
+        self.assertIn("deauth", out.getvalue())
+
     def test_watch_rejects_a_missing_directory(self):
         code, out, err = self.cli("--watch", self.path("nope-does-not-exist"))
         self.assertEqual(code, 2)
@@ -1521,7 +1610,8 @@ class TestUi(unittest.TestCase):
     def test_menu_analyze_builds_the_expected_argv(self):
         from matt import ui
         calls = []
-        answers = iter(["1", "somereport.json", "", "q"])
+        # category 1 (Capture & analyze), blank = recommended (Analyze a file)
+        answers = iter(["1", "", "somereport.json", "", "q"])
         code = ui.run_menu(
             None, lambda a: (calls.append(a), 0)[1],
             reader=lambda p="": next(answers, "q"),
@@ -1533,8 +1623,9 @@ class TestUi(unittest.TestCase):
         self.assertIn("--no-banner", calls[0])
 
     def test_menu_wpa_scans_picks_and_dispatches_with_the_right_argv(self):
-        """Menu option 5: scan -> pick a network -> MATT auto-fills BSSID+channel
-        and dispatches --wpa with the authorization gate, no iw typing by hand."""
+        """Category 2 (Poison & intercept) -> action 3 (WPA): scan -> pick a
+        network -> MATT auto-fills BSSID+channel and dispatches --wpa with the
+        authorization gate, no iw typing by hand."""
         from matt import ui, wifi
         calls = []
         orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
@@ -1546,8 +1637,9 @@ class TestUi(unittest.TestCase):
             {"bssid": "8a:a1:d8:2d:0e:95", "ssid": "Starlink",
              "channel": 11, "signal": -41.0}]
         try:
-            # adapter, pick #1, no client, YES to auth, no to crack, then quit
-            answers = iter(["5", "wlan1", "1", "", "YES", "n", "q"])
+            # category 2, action 3 (WPA), adapter, pick #1, no client, YES to
+            # auth, no to crack, then quit
+            answers = iter(["2", "3", "wlan1", "1", "", "YES", "n", "q"])
             ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
@@ -1569,7 +1661,7 @@ class TestUi(unittest.TestCase):
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
         try:
-            answers = iter(["5", "wlan1", "1", "", "no", "q"])
+            answers = iter(["2", "3", "wlan1", "1", "", "no", "q"])
             ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
@@ -1581,13 +1673,45 @@ class TestUi(unittest.TestCase):
         """Choosing live MITM but not typing YES must run nothing and return 2."""
         from matt import ui
         calls = []
-        # 3=MITM, iface, duration, gateway(blank), authorization(not YES), then quit
-        answers = iter(["3", "wlan0", "5", "", "no", "", "q"])
+        # category 1, action 3 (MITM), iface, duration, gateway(blank),
+        # authorization(not YES), then quit
+        answers = iter(["1", "3", "wlan0", "5", "", "no", "", "q"])
         code = ui.run_menu(
             None, lambda a: (calls.append(a), 0)[1],
             reader=lambda p="": next(answers, "q"),
             writer=lambda *a: None, clear=lambda: None)
         self.assertEqual(calls, [], "unauthorized MITM must not dispatch a run")
+
+    def test_menu_recommended_default_on_blank_mitm_category(self):
+        """Category 2 (Poison & intercept)'s recommended default is ARP MITM;
+        a blank answer there should pick it without typing '1'."""
+        from matt import ui
+        calls = []
+        # category 2, blank (-> recommended = ARP MITM), iface, duration,
+        # gateway(blank), authorization YES, dry-run? no, then quit
+        answers = iter(["2", "", "wlan0", "5", "", "YES", "n", "q"])
+        ui.run_menu(
+            None, lambda a: (calls.append(a), 0)[1],
+            reader=lambda p="": next(answers, "q"),
+            writer=lambda *a: None, clear=lambda: None)
+        self.assertTrue(calls, "blank answer did not run the recommended action")
+        argv = calls[0]
+        self.assertIn("--iface", argv); self.assertIn("wlan0", argv)
+        self.assertIn("--i-have-written-authorization", argv)
+        self.assertNotIn("--no-poison", argv, "recommended category 2 action is MITM, not passive")
+
+    def test_menu_submenu_back_returns_to_top_level(self):
+        """'b' in a submenu goes back to the category list without dispatching
+        anything, instead of being rejected as an invalid top-level choice."""
+        from matt import ui
+        calls = []
+        answers = iter(["1", "b", "q"])
+        code = ui.run_menu(
+            None, lambda a: (calls.append(a), 0)[1],
+            reader=lambda p="": next(answers, "q"),
+            writer=lambda *a: None, clear=lambda: None)
+        self.assertEqual(calls, [], "'back' must not dispatch anything")
+        self.assertEqual(code, 0)
 
 
 # --------------------------------------------------------------------------
@@ -2205,6 +2329,61 @@ class TestWifiHandshake(unittest.TestCase):
         self.assertEqual(aps[0]["signal"], -41.0)              # strongest first
         self.assertEqual(wifi.channel_for(aps, bssid="11:22:33:44:55:66"), 149)
         self.assertEqual(wifi.channel_for(aps, ssid="HomeNet"), 11)  # strongest match
+
+    def test_dwell_scan_counts_distinct_devices_via_tshark(self):
+        from matt import wifi
+
+        class _Res:
+            stdout = "aa:aa:aa:aa:aa:aa\nbb:bb:bb:bb:bb:bb\naa:aa:aa:aa:aa:aa\nff:ff:ff:ff:ff:ff\n"
+
+        result = wifi.dwell_scan(
+            "wlan1", 6, seconds=0.2, runner=lambda cmd: None,
+            capture_runner=lambda cmd, timeout: _Res(),
+            which=lambda t: "/usr/bin/tshark" if t == "tshark" else None)
+        self.assertEqual(result["channel"], 6)
+        self.assertEqual(result["frames"], 3)   # broadcast excluded
+        self.assertEqual(result["devices"], 2)  # aa.. and bb.. distinct
+
+    def test_dwell_scan_falls_back_to_tcpdump_frame_count(self):
+        from matt import wifi
+
+        class _Res:
+            stdout = "line one\nline two\nline three\n"
+            stderr = ""
+
+        result = wifi.dwell_scan(
+            "wlan1", 11, seconds=0.2, runner=lambda cmd: None,
+            capture_runner=lambda cmd, timeout: _Res(),
+            which=lambda t: ("/usr/bin/" + t) if t in ("tcpdump", "timeout") else None)
+        self.assertEqual(result["frames"], 3)
+        self.assertEqual(result["devices"], 3)  # no MAC parsing in this path
+
+    def test_best_channel_by_activity_ranks_busiest_first_and_reports_progress(self):
+        from matt import wifi
+        seen = {}
+        progress = []
+
+        def fake_dwell(iface, channel, seconds=1.5, runner=None,
+                       capture_runner=None, which=None):
+            devices = {1: 1, 6: 5, 11: 2}.get(channel, 0)
+            return {"channel": channel, "frames": devices, "devices": devices}
+
+        orig = wifi.dwell_scan
+        wifi.dwell_scan = fake_dwell
+        try:
+            ranked = wifi.best_channel_by_activity(
+                "wlan1", channels=[1, 6, 11], dwell=0.1,
+                on_progress=lambda i, n, ch: progress.append((i, n, ch)),
+                runner=lambda cmd: seen.setdefault("calls", []).append(cmd))
+        finally:
+            wifi.dwell_scan = orig
+        self.assertEqual(ranked[0]["channel"], 6)   # busiest first
+        self.assertEqual([p[2] for p in progress], [1, 6, 11])
+        self.assertEqual(progress[-1], (3, 3, 11))
+        # monitor mode was set up and torn down around the scan
+        joined = " ".join(" ".join(c) for c in seen["calls"])
+        self.assertIn("set type monitor", joined)
+        self.assertIn("set type managed", joined)
 
     def test_orchestrate_runs_the_pipeline_with_injected_runner(self):
         from matt import wifi

