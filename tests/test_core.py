@@ -1537,7 +1537,11 @@ class TestUi(unittest.TestCase):
         and dispatches --wpa with the authorization gate, no iw typing by hand."""
         from matt import ui, wifi
         calls = []
-        orig = wifi.list_aps
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        # Hermetic: the menu's first step is a host tool-check (iw/aircrack).
+        # Stub it so this test exercises the scan->pick->dispatch flow on any
+        # runner, present tools or not (CI has none; a Kali box has them all).
+        wifi.missing_tools = lambda: []
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "8a:a1:d8:2d:0e:95", "ssid": "Starlink",
              "channel": 11, "signal": -41.0}]
@@ -1548,7 +1552,7 @@ class TestUi(unittest.TestCase):
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
         finally:
-            wifi.list_aps = orig
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
         self.assertTrue(calls, "menu never dispatched the WPA action")
         argv = calls[0]
         self.assertIn("--wpa", argv)
@@ -1560,7 +1564,8 @@ class TestUi(unittest.TestCase):
     def test_menu_wpa_without_authorization_runs_nothing(self):
         from matt import ui, wifi
         calls = []
-        orig = wifi.list_aps
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        wifi.missing_tools = lambda: []
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
         try:
@@ -1569,7 +1574,7 @@ class TestUi(unittest.TestCase):
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
         finally:
-            wifi.list_aps = orig
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
         self.assertEqual(calls, [], "WPA must not run without typed authorization")
 
     def test_menu_mitm_requires_typed_authorization(self):
