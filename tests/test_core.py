@@ -14,6 +14,7 @@ fails, and the run that would have quietly cost tokens never happens.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import json
 import os
@@ -1498,7 +1499,8 @@ class TestCli(TempDirCase):
         core.write_report(sample_report(), path)
         md5_hash = hashlib.md5(b"hunter2").hexdigest()
 
-        def fake_crack(findings, wordlist=None, timeout=None, optimized=True):
+        def fake_crack(findings, wordlist=None, timeout=None, optimized=True,
+                      wpa_cap=None, **_ignored):
             return [{"host": f.get("host"), "username": f.get("username"),
                     "target": f.get("target"), "kind": f.get("kind"),
                     "mode": str(f.get("hashcat_mode")), "candidate": f["candidate"],
@@ -1572,6 +1574,39 @@ class TestCli(TempDirCase):
         proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
                               text=True, timeout=120)
         self.assertIn("ZERO-NETWORK-OK", proc.stdout, proc.stderr)
+
+
+class TestLinkEmailsToPlaintext(unittest.TestCase):
+    """A bare email sighted alongside a hash that LATER gets cracked by
+    --crack is still the same captured credential -- upgrade it once the
+    plaintext is known, don't leave it looking like just a sighting."""
+
+    def test_upgrades_a_bare_email_once_its_sibling_hash_is_cracked(self):
+        from matt import cli
+        findings = [
+            {"kind": "email", "candidate": "jane.doe@example.com",
+             "username": "jane.doe@example.com", "target": "corp.local",
+             "credential_bearing": False},
+            {"kind": "ntlmv2", "candidate": "...", "target": "corp.local",
+             "plaintext": "Summer2026!"},
+        ]
+        cli._link_emails_to_plaintext(findings)
+        email = findings[0]
+        self.assertTrue(email["credential_bearing"])
+        self.assertEqual(email["plaintext"], "Summer2026!")
+        self.assertEqual(email["candidate"], "jane.doe@example.com:Summer2026!")
+
+    def test_leaves_an_unrelated_email_alone(self):
+        from matt import cli
+        findings = [
+            {"kind": "email", "candidate": "a@b.com", "username": "a@b.com",
+             "target": "siteA", "credential_bearing": False},
+            {"kind": "ntlmv2", "candidate": "...", "target": "siteB",
+             "plaintext": "hunter2"},
+        ]
+        cli._link_emails_to_plaintext(findings)
+        self.assertFalse(findings[0]["credential_bearing"])
+        self.assertNotIn("plaintext", findings[0])
 
 
 # --------------------------------------------------------------------------
@@ -1822,6 +1857,204 @@ class TestCrack(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    # ---- aircrack-ng fallback for a WPA (mode 22000) OOM -----------------
+
+    def test_crack_wpa_cap_parses_key_found(self):
+        from matt import crack
+
+        def fake_runner(cmd, timeout):
+            class P:
+                stdout = "junk\x1b[2KKEY FOUND! [ LKn1ght5 ]\x1b[0m\n"
+                stderr = ""
+            return P()
+
+        cap = tempfile.NamedTemporaryFile(suffix=".cap", delete=False)
+        cap.close()
+        try:
+            result = crack.crack_wpa_cap(cap.name, "/dev/null", runner=fake_runner)
+        finally:
+            os.unlink(cap.name)
+        self.assertEqual(result["plaintext"], "LKn1ght5")
+        self.assertIsNone(result["note"])
+
+    def test_crack_wpa_cap_reports_not_in_wordlist(self):
+        from matt import crack
+
+        def fake_runner(cmd, timeout):
+            class P:
+                stdout = ""
+                stderr = "Passphrase not in dictionary\n"
+            return P()
+
+        cap = tempfile.NamedTemporaryFile(suffix=".cap", delete=False)
+        cap.close()
+        try:
+            result = crack.crack_wpa_cap(cap.name, "/dev/null", runner=fake_runner)
+        finally:
+            os.unlink(cap.name)
+        self.assertIsNone(result["plaintext"])
+        self.assertEqual(result["note"], "not in wordlist")
+
+    def test_crack_wpa_cap_missing_file(self):
+        from matt import crack
+        result = crack.crack_wpa_cap("/no/such/file.cap", "/dev/null")
+        self.assertIsNone(result["plaintext"])
+        self.assertIn("not found", result["note"])
+
+    def test_crack_falls_back_to_aircrack_on_hashcat_oom(self):
+        """A WPA finding (mode 22000) that OOMs hashcat on a low-RAM box
+        should still get a real answer via aircrack-ng against the raw .cap,
+        instead of just "crack on a bigger machine"."""
+        from matt import crack
+
+        findings = [{"kind": "wpa-eh2912", "hashcat_mode": "22000",
+                    "candidate": "WPA*02*deadbeef*...", "host": "the wire"}]
+
+        def oom_runner(cmd, timeout):
+            class P:
+                returncode = 0
+                stdout = "Not enough allocatable device memory\n"
+                stderr = ""
+            return P()
+
+        def fake_aircrack_runner(cmd, timeout):
+            class P:
+                stdout = "KEY FOUND! [ LKn1ght5 ]\n"
+                stderr = ""
+            return P()
+
+        cap = tempfile.NamedTemporaryFile(suffix=".cap", delete=False)
+        cap.close()
+        try:
+            results = crack.crack(findings, wordlist="/dev/null",
+                                  runner=oom_runner, wpa_cap=cap.name,
+                                  aircrack_runner=fake_aircrack_runner)
+        finally:
+            os.unlink(cap.name)
+        self.assertEqual(results[0]["plaintext"], "LKn1ght5")
+
+    def test_crack_without_wpa_cap_still_reports_oom_plainly(self):
+        """No .cap given (or no aircrack-ng) -- the OOM note must stay an
+        honest resource failure, not silently look like 'not in wordlist'."""
+        from matt import crack
+
+        findings = [{"kind": "wpa-eh2912", "hashcat_mode": "22000",
+                    "candidate": "WPA*02*deadbeef*...", "host": "the wire"}]
+
+        def oom_runner(cmd, timeout):
+            class P:
+                returncode = 0
+                stdout = "Not enough allocatable device memory\n"
+                stderr = ""
+            return P()
+
+        results = crack.crack(findings, wordlist="/dev/null", runner=oom_runner)
+        self.assertIsNone(results[0]["plaintext"])
+        self.assertIn("out of memory", results[0]["note"])
+
+    def test_crack_matches_real_wpa_outfile_format_not_raw_hash(self):
+        """A real hashcat -m 22000 crack does NOT echo the input WPA*02*...
+        candidate string back in its outfile -- it reformats the cracked
+        line as hash:AP-MAC:client-MAC:ESSID:plaintext, discarding the
+        original candidate entirely (verified against a real captured
+        Staff-Wireless handshake). A naive ``cand.lower()`` lookup against
+        that line can never match, which silently reported every real WPA
+        crack as "not in wordlist" even when hashcat found the password.
+        crack() must match by the (hash, AP MAC, client MAC) triple instead."""
+        from matt import crack
+
+        candidate = ("WPA*02*0ad935a34a4fc5959e8457d991c7469e*e663daeb6b03*"
+                    "769c0419b3fe*53746166662d576972656c657373*deadbeef*80")
+        findings = [{"kind": "wpa-eh2912", "hashcat_mode": "22000",
+                    "candidate": candidate, "host": "the wire"}]
+
+        def runner(cmd, timeout):
+            outfile = cmd[cmd.index("-o") + 1]
+            with open(outfile, "w", encoding="utf-8") as fh:
+                fh.write("0ad935a34a4fc5959e8457d991c7469e:e663daeb6b03:"
+                         "769c0419b3fe:Staff-Wireless:LKn1ght5\n")
+            class P:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return P()
+
+        results = crack.crack(findings, wordlist="/dev/null", runner=runner)
+        self.assertEqual(results[0]["plaintext"], "LKn1ght5")
+
+    # ---- the generative/contextual wordlist (SSID, usernames, hosts...) --
+
+    def test_seeds_from_findings_pulls_username_host_target_and_email_parts(self):
+        from matt import crack
+        findings = [
+            {"username": "jane.doe@example.com", "host": "WKS-1", "target": "site"},
+            {"username": "bob", "host": None, "target": None},
+        ]
+        seeds = crack.seeds_from_findings(findings, extra=["Staff-Wireless"])
+        self.assertIn("jane.doe@example.com", seeds)
+        self.assertIn("jane.doe", seeds)       # email local-part
+        self.assertIn("example", seeds)        # email domain, first label
+        self.assertIn("WKS-1", seeds)
+        self.assertIn("site", seeds)
+        self.assertIn("bob", seeds)
+        self.assertIn("Staff-Wireless", seeds)  # extra (e.g. the WPA SSID)
+
+    def test_seeds_from_findings_skips_none_and_dedupes(self):
+        from matt import crack
+        findings = [{"username": "bob", "host": "bob", "target": None}]
+        seeds = crack.seeds_from_findings(findings, extra=[None, "", "bob"])
+        self.assertEqual(seeds.count("bob"), 1)
+
+    def test_build_contextual_wordlist_writes_mutations_of_the_ssid(self):
+        from matt import crack
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "ctx.txt")
+            ok = crack.build_contextual_wordlist(["Staff-Wireless"], out)
+            self.assertTrue(ok)
+            with open(out, encoding="utf-8") as fh:
+                lines = set(fh.read().splitlines())
+            self.assertIn("Staff-Wireless", lines)
+            self.assertIn("Staff1", lines)       # the "Staff" sub-token, mutated
+
+    def test_build_contextual_wordlist_no_seeds_writes_nothing(self):
+        from matt import crack
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "ctx.txt")
+            ok = crack.build_contextual_wordlist([], out)
+            self.assertFalse(ok)
+            self.assertFalse(os.path.exists(out))
+
+    def test_crack_tries_contextual_wordlist_before_the_real_one(self):
+        """A password built from the target's own context (here: the finding's
+        username, "Max") should crack in the free contextual pre-pass, without
+        ever needing the real wordlist pass at all."""
+        from matt import crack
+        target_hash = hashlib.md5(b"Max1!").hexdigest()
+        findings = [{"kind": "md5", "hashcat_mode": "0", "candidate": target_hash,
+                    "host": "h", "username": "Max"}]
+        calls = []
+
+        def spy_runner(cmd, timeout):
+            calls.append(cmd)
+            hashfile, wordlist_path, outfile = cmd[-3], cmd[-2], cmd[cmd.index("-o") + 1]
+            with open(wordlist_path, encoding="utf-8", errors="ignore") as fh:
+                words = fh.read().splitlines()
+            with open(hashfile, encoding="utf-8") as fh:
+                wanted = fh.read().strip()
+            for w in words:
+                if hashlib.md5(w.encode()).hexdigest() == wanted:
+                    with open(outfile, "w", encoding="utf-8") as fh:
+                        fh.write(f"{wanted}:{w}\n")
+                    break
+            return None
+
+        results = crack.crack(findings, wordlist="/dev/null", runner=spy_runner,
+                              context_seeds=crack.seeds_from_findings(findings))
+        self.assertEqual(results[0]["plaintext"], "Max1!")
+        # one hashcat invocation only: the contextual pre-pass cracked it, so
+        # the real (here: deliberately empty) wordlist pass was never needed.
+        self.assertEqual(len(calls), 1)
+
 
 # --------------------------------------------------------------------------
 # 13. cleartext protocol logins (FTP/POP3, IMAP, SMTP, LDAP)
@@ -1983,6 +2216,53 @@ class TestCleartextLogins(unittest.TestCase):
         self.assertEqual(f["kind"], "snmp")
         self.assertEqual(f["candidate"], "private")   # not ":private"
         self.assertTrue(f["credential_bearing"])
+
+
+# --------------------------------------------------------------------------
+# 13b. bare email addresses -- a credential when paired with a password
+# --------------------------------------------------------------------------
+
+class TestEmailCapture(unittest.TestCase):
+    def test_email_with_password_field_is_credential_bearing(self):
+        """A login form posting an email + password in the clear is a real
+        captured credential pair, not just an address sighting."""
+        raw = (b"POST /login HTTP/1.1\r\nHost: shop.example.com\r\n\r\n"
+               b"email=jane.doe%40example.com&password=Summer2026!")
+        found = core.candidates_from_payload(raw)
+        emails = [f for f in found if f["kind"] == "email"]
+        self.assertEqual(len(emails), 1)
+        self.assertTrue(emails[0]["credential_bearing"])
+        self.assertEqual(emails[0]["username"], "jane.doe@example.com")
+        self.assertEqual(emails[0]["candidate"], "jane.doe@example.com:Summer2026!")
+
+    def test_bare_email_with_no_password_is_not_credential_bearing(self):
+        raw = b"X-Forwarded-For: 10.0.0.1\r\nTo: someone@example.org\r\n"
+        found = core.candidates_from_payload(raw)
+        emails = [f for f in found if f["kind"] == "email"]
+        self.assertEqual(len(emails), 1)
+        self.assertFalse(emails[0]["credential_bearing"])
+        self.assertEqual(emails[0]["candidate"], "someone@example.org")
+
+    def test_email_already_a_login_username_is_not_duplicated(self):
+        """FTP/POP3/IMAP/SMTP already surface an email-shaped username as a
+        credential-bearing finding -- a bare 'email' finding for the exact
+        same address would just be noise."""
+        raw = b"USER jane.doe@example.com\r\nPASS hunter2\r\n"
+        found = core.candidates_from_payload(raw)
+        self.assertEqual([f["kind"] for f in found], ["ftp"])
+        self.assertEqual(found[0]["username"], "jane.doe@example.com")
+
+    def test_email_paired_with_a_separate_cleartext_login_in_same_payload(self):
+        """An email sitting elsewhere in a payload that also carries a
+        cleartext login (not itself keyed to that email) still gets paired
+        with that recovered password rather than left as a bare sighting."""
+        raw = (b"Reply-To: jane.doe@example.com\r\n"
+               b"USER alice\r\nPASS S3cr3t!\r\n")
+        found = core.candidates_from_payload(raw)
+        emails = [f for f in found if f["kind"] == "email"]
+        self.assertEqual(len(emails), 1)
+        self.assertTrue(emails[0]["credential_bearing"])
+        self.assertEqual(emails[0]["candidate"], "jane.doe@example.com:S3cr3t!")
 
 
 # --------------------------------------------------------------------------

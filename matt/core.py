@@ -1445,6 +1445,8 @@ _KV_PATTERNS = (
 
 _BARE_NTLM_RE = re.compile(rb"([0-9a-fA-F]{32}):([0-9a-fA-F]{32}):([0-9a-fA-F]{16})")
 
+_EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
 _REQ_LINE_RE = re.compile(rb"(?im)^(?:GET|POST|PUT|PATCH|DELETE)[ \t]+(\S+)[ \t]+HTTP/")
 _HOST_HDR_RE = re.compile(rb"(?im)^Host:[ \t]*([^\r\n]+)")
 
@@ -1650,6 +1652,33 @@ def candidates_from_payload(payload, source: str = "wire", port=None) -> list:
             method, text = decode_field(raw)
             add(disc_kind, None, text, method, credential_bearing=False,
                 protocol=disc_kind, discovery_label=_DISCOVERY_LABELS[disc_kind])
+
+    # 5h. bare email addresses in the clear. On their own these are just
+    #     contact info -- but one paired with a plaintext password already
+    #     found in this SAME payload (a login form's password= field, or a
+    #     cleartext protocol login whose username happens to be an email) is
+    #     a real captured credential, so it is surfaced as credential-bearing
+    #     too, not just a passive sighting. Skip an address that is already a
+    #     finding's username (the POP3/IMAP/SMTP paths above already cover
+    #     that pairing).
+    for match in _EMAIL_RE.finditer(raw.replace(b"%40", b"@")):
+        addr = match.group(0).decode("ascii", "ignore")
+        if any(f.get("username") == addr for f in found):
+            continue
+        paired_pw = fields.get("password")
+        if not paired_pw:
+            paired_pw = next(
+                (f["candidate"].rsplit(":", 1)[-1] for f in found
+                 if f.get("credential_bearing")
+                 and f.get("kind") in ("ftp", "pop3", "imap", "smtp", "http-basic")
+                 and ":" in str(f.get("candidate", ""))),
+                None)
+        if paired_pw:
+            add("email", None, f"{addr}:{paired_pw}", "cleartext",
+                username=addr, credential_bearing=True, protocol="email", **dest)
+        else:
+            add("email", None, addr, "cleartext",
+                username=addr, credential_bearing=False, protocol="email", **dest)
 
     # 6. nothing structured: keep the payload itself so a human can look at it.
     if not found and raw:
@@ -1961,6 +1990,11 @@ def stage2_prose(finding: dict) -> str:
         return (f"{host} opened a QUIC / HTTP3 connection ({candidate}). The SNI is "
                 "inside an AEAD-encrypted QUIC Initial packet, so the hostname is "
                 "not recoverable without the keys.")
+
+    if kind == "email" and not finding.get("credential_bearing"):
+        return (f"{host} exposed the email address {candidate!r} to {where}. Not "
+                "a credential by itself -- no password rode with it -- but useful "
+                "for recon and as a seed for a targeted wordlist.")
 
     if mode is None:
         # a cleartext credential (FTP/IMAP/SMTP/LDAP/HTTP-Basic): the password was

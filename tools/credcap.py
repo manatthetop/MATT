@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import itertools
+import re
 import sys
 
 # --------------------------------------------------------------------------
@@ -193,6 +194,34 @@ def generate(span: int = 12, heavy_top: int = 60):
             yield cand
 
 
+def generate_contextual(seeds, span: int = 12):
+    """Yield mutated forms of each ``seed`` FIRST, ahead of any generic list --
+    a real password is far more often built from something about its own
+    target (the network's SSID, a decoded username, a hostname, a device
+    name, an email's local-part) than from a generic top-1000 word, so these
+    get the full ``_emit`` rule set every time, not just the first 60.
+
+    Each seed is also split on whitespace/-/_/. so "Staff-Wireless" yields
+    mutations of "Staff" and "Wireless" individually too, since a password
+    is more often built from one word in a name than the whole compound.
+    """
+    years = _years(span)
+    seen_seed = set()
+    bases = []
+    for raw in seeds or []:
+        s = str(raw or "").strip()
+        if not s or s.lower() in ("none", "unknown", ""):
+            continue
+        parts = [s] + [p for p in re.split(r"[\s\-_.]+", s) if p]
+        for p in parts:
+            if len(p) >= 3 and p.lower() not in seen_seed:
+                seen_seed.add(p.lower())
+                bases.append(p)
+    for base in bases:
+        for cand in _emit(base, years, heavy=True):
+            yield cand
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="credcap", description="Generate the credcap wordlist.")
@@ -207,7 +236,24 @@ def main(argv=None) -> int:
                          "credcap did not already emit -- a strict superset")
     ap.add_argument("--max", type=int, default=0,
                     help="stop after N entries (0 = no cap)")
+    ap.add_argument("--seed", action="append", default=[], metavar="WORD",
+                    help="a target-specific word (SSID, username, hostname, "
+                         "device/vendor name, email local-part...) to mutate "
+                         "and emit FIRST, ahead of the generic list -- repeat "
+                         "for more than one. Real passwords are built from "
+                         "these far more often than from a generic top list.")
+    ap.add_argument("--seeds-file", metavar="PATH",
+                    help="one seed word per line, same treatment as --seed")
     args = ap.parse_args(argv)
+
+    seeds = list(args.seed)
+    if args.seeds_file:
+        try:
+            with open(args.seeds_file, encoding="utf-8", errors="ignore") as fh:
+                seeds += [ln.strip() for ln in fh if ln.strip()]
+        except OSError as exc:
+            sys.stderr.write("credcap: could not read %s: %s\n"
+                             % (args.seeds_file, exc))
 
     seen = set()
     n = 0
@@ -221,11 +267,18 @@ def main(argv=None) -> int:
             n += 1
             return True
 
+        contextual = 0
+        if seeds:
+            for cand in generate_contextual(seeds, span=args.years):
+                if write(cand):
+                    contextual += 1
+                if args.max and n >= args.max:
+                    break
         for cand in generate(span=args.years, heavy_top=args.heavy):
             write(cand)
             if args.max and n >= args.max:
                 break
-        smart = n
+        smart = n - contextual
         if args.merge and not (args.max and n >= args.max):
             try:
                 with open(args.merge, encoding="utf-8", errors="ignore") as src:
@@ -236,8 +289,12 @@ def main(argv=None) -> int:
             except OSError as exc:
                 sys.stderr.write("credcap: could not read %s: %s\n"
                                  % (args.merge, exc))
-    merged = n - smart
+    merged = n - smart - contextual
     print("credcap: wrote %d entries to %s" % (n, args.out))
+    if seeds:
+        print("  contextual      : %d (from %d seed word(s): %s)"
+              % (contextual, len(seeds), ", ".join(seeds[:8])
+                 + (" ..." if len(seeds) > 8 else "")))
     print("  smart/generated : %d (these come first, likeliest -> deepest)" % smart)
     if args.merge:
         print("  merged-in extras: %d unique lines from %s" % (merged, args.merge))

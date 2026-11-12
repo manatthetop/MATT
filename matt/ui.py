@@ -510,7 +510,8 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     code = dispatch(argv)
     # offer to crack a captured handshake straight away
     if _yes(reader("  crack the captured handshake now with hashcat? [y/N]: ")):
-        argv = ["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner"]
+        argv = ["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner",
+                "--ssid", target["ssid"]]
         wl = _pick_wordlist(reader, writer, out)
         if wl:
             argv += ["--wordlist", wl]

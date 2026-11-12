@@ -145,7 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
         "crack (optional: run hashcat on the findings)")
     crack.add_argument("--crack", action="store_true",
                        help="after analysis, run hashcat on the credential-bearing "
-                            "findings and show any recovered plaintext")
+                            "findings and show any recovered plaintext. Before the "
+                            "real wordlist, MATT always tries a small wordlist it "
+                            "generates on the fly from the target's own context "
+                            "(decoded usernames/hosts/emails, and --ssid for a WPA "
+                            "crack) -- a password built from the target itself "
+                            "often cracks in this pass alone")
     crack.add_argument("--wordlist", metavar="PATH", default=None,
                        help="wordlist for --crack "
                             "(default: /usr/share/wordlists/rockyou.txt)")
@@ -266,10 +271,24 @@ def _c(text, *styles):
         return text
 
 
+def _derive_wpa_cap(report_path) -> "str | None":
+    """If the --analyze-only input is a plain *.22000 hash file (e.g. the
+    matt-wpa.22000 --wpa just produced), the raw handshake sits next to it as
+    <prefix>-01.cap (wifi.orchestrate's naming convention). Return that path
+    if it exists, so a hashcat OOM can fall back to aircrack-ng, which needs
+    far less memory for the same WPA attack."""
+    if not report_path or not report_path.endswith(".22000"):
+        return None
+    cap = report_path[: -len(".22000")] + "-01.cap"
+    return cap if os.path.exists(cap) else None
+
+
 def _run_crack(findings, args) -> None:
     """The 'crack this now' step: hand the credential-bearing findings to
     hashcat and show any recovered plaintext. Red-themed, since this is the step
-    that actually turns a captured hash into a password."""
+    that actually turns a captured hash into a password. Falls back to
+    aircrack-ng for a WPA (mode 22000) finding if hashcat runs out of memory
+    and the raw .cap is findable next to the --analyze-only input."""
     from . import crack as _crack
     wl = args.wordlist or _crack.DEFAULT_WORDLIST
     print()
@@ -288,8 +307,14 @@ def _run_crack(findings, args) -> None:
         return
     print(_c("  running hashcat on %d candidate(s) against %s ..."
              % (len(targets), wl), "red"))
+    wpa_cap = _derive_wpa_cap(getattr(args, "analyze_only", None))
+    if wpa_cap and not _crack.have_aircrack():
+        wpa_cap = None  # nothing to fall back to -- don't claim we will
+    context_seeds = _crack.seeds_from_findings(
+        findings, extra=[getattr(args, "ssid", None)])
     results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout,
-                           optimized=not args.crack_slow)
+                           optimized=not args.crack_slow, wpa_cap=wpa_cap,
+                           context_seeds=context_seeds)
     cracked = 0
     for r in results:
         who = r.get("username") or "(no user)"
@@ -310,6 +335,26 @@ def _run_crack(findings, args) -> None:
     for f in findings:
         if f.get("candidate") in plain:
             f["plaintext"] = plain[f["candidate"]]
+    _link_emails_to_plaintext(findings)
+
+
+def _link_emails_to_plaintext(findings) -> None:
+    """A bare email address seen in the same payload as a hash that just got
+    cracked (same ``target``/``host``) is a real recovered credential pair,
+    not just a passive sighting -- upgrade it in place once cracking is done."""
+    cracked_by_dest = {}
+    for f in findings:
+        dest = f.get("target") or f.get("host")
+        if f.get("plaintext") and dest:
+            cracked_by_dest.setdefault(dest, f["plaintext"])
+    for f in findings:
+        if f.get("kind") != "email" or f.get("credential_bearing"):
+            continue
+        pw = cracked_by_dest.get(f.get("target") or f.get("host"))
+        if pw:
+            f["credential_bearing"] = True
+            f["plaintext"] = pw
+            f["candidate"] = "%s:%s" % (f.get("username") or f["candidate"], pw)
 
 
 def run_wpa(args) -> int:
@@ -692,12 +737,19 @@ def _annotate_crack(findings, args) -> None:
     wl = args.wordlist or _crack.DEFAULT_WORDLIST
     if not _crack.have_hashcat() or not os.path.exists(wl):
         return
+    wpa_cap = _derive_wpa_cap(getattr(args, "analyze_only", None))
+    if wpa_cap and not _crack.have_aircrack():
+        wpa_cap = None
+    context_seeds = _crack.seeds_from_findings(
+        findings, extra=[getattr(args, "ssid", None)])
     results = _crack.crack(findings, wordlist=wl, timeout=args.crack_timeout,
-                           optimized=not args.crack_slow)
+                           optimized=not args.crack_slow, wpa_cap=wpa_cap,
+                           context_seeds=context_seeds)
     plain = {r["candidate"]: r["plaintext"] for r in results if r["plaintext"]}
     for f in findings:
         if f.get("candidate") in plain:
             f["plaintext"] = plain[f["candidate"]]
+    _link_emails_to_plaintext(findings)
 
 
 def _clip(text, width):
@@ -722,7 +774,7 @@ def _finding_secret(f):
 # a crackable hash, cyan = recon (TLS/SNMPv3/QUIC), dim = nothing yet.
 _CLEARTEXT_KINDS = {"ftp", "pop3", "imap", "smtp", "ldap", "telnet",
                     "http-basic", "snmp"}
-_RECON_KINDS = {"tls-sni", "tls-cert", "quic", "snmpv3"}
+_RECON_KINDS = {"tls-sni", "tls-cert", "quic", "snmpv3", "email"}
 
 
 def _kind_style(kind):
