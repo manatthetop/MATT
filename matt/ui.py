@@ -428,6 +428,9 @@ def _do_live(parser, dispatch, reader, writer, out, poison: bool) -> int:
     # the gate flag is still required by the engine; the prompt above IS the
     # operator confirming it, so pass it through for both passive and MITM runs.
     argv.append("--i-have-written-authorization")
+    keylog = reader("  TLS key log to decrypt HTTPS [blank = none]: ").strip()
+    if keylog:
+        argv += ["--keylog", keylog]
     if _yes(reader("  dry run first (show what would run)? [y/N]: ")):
         writer("")
         dispatch(argv + ["--dry-run"])

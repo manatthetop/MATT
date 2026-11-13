@@ -1751,7 +1751,7 @@ class TestUi(unittest.TestCase):
         calls = []
         # category 2, blank (-> recommended = ARP MITM), iface, duration,
         # gateway(blank), authorization YES, dry-run? no, then quit
-        answers = iter(["2", "", "wlan0", "5", "", "YES", "n", "q"])
+        answers = iter(["2", "", "wlan0", "5", "", "YES", "", "n", "q"])
         ui.run_menu(
             None, lambda a: (calls.append(a), 0)[1],
             reader=lambda p="": next(answers, "q"),
@@ -1761,6 +1761,29 @@ class TestUi(unittest.TestCase):
         self.assertIn("--iface", argv); self.assertIn("wlan0", argv)
         self.assertIn("--i-have-written-authorization", argv)
         self.assertNotIn("--no-poison", argv, "recommended category 2 action is MITM, not passive")
+
+    def test_menu_passes_keylog_path_through(self):
+        from matt import ui
+        calls = []
+        answers = iter(["2", "", "wlan0", "5", "", "YES", "/tmp/keys.log", "n", "q"])
+        ui.run_menu(
+            None, lambda a: (calls.append(a), 0)[1],
+            reader=lambda p="": next(answers, "q"),
+            writer=lambda *a: None, clear=lambda: None)
+        self.assertTrue(calls)
+        argv = calls[0]
+        self.assertEqual(argv[argv.index("--keylog") + 1], "/tmp/keys.log")
+
+    def test_menu_blank_keylog_adds_no_flag(self):
+        from matt import ui
+        calls = []
+        answers = iter(["2", "", "wlan0", "5", "", "YES", "", "n", "q"])
+        ui.run_menu(
+            None, lambda a: (calls.append(a), 0)[1],
+            reader=lambda p="": next(answers, "q"),
+            writer=lambda *a: None, clear=lambda: None)
+        self.assertTrue(calls)
+        self.assertNotIn("--keylog", calls[0])
 
     def test_menu_submenu_back_returns_to_top_level(self):
         """'b' in a submenu goes back to the category list without dispatching
