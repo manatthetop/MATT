@@ -181,6 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
     wifi.add_argument("--client", help="client MAC to deauth (default: broadcast)")
     wifi.add_argument("--deauth", type=int, default=5, dest="deauth_count",
                       help="deauth frames to send (0 = continuous; default 5)")
+    wifi.add_argument("--no-deauth", action="store_true",
+                      help="listen only: send no deauth, so a handshake is caught "
+                           "only when a device reconnects on its own")
     wifi.add_argument("--capture-secs", type=float, default=20.0,
                       help="seconds the handshake capture stays open per attempt "
                            "(default 20)")
@@ -407,7 +410,8 @@ def run_wpa(args) -> int:
         print(_c("  auto-detected: AP %s on channel %s"
                  % (args.bssid, args.channel), "green"))
     pln = wifi.plan(args.iface, args.bssid, args.channel or "<auto>",
-                    client=args.client, count=args.deauth_count, out=args.wpa_out)
+                    client=args.client, count=args.deauth_count, out=args.wpa_out,
+                    send_deauth=not args.no_deauth)
     if args.dry_run or gone:
         if gone:
             print(_c("  missing tools: %s  (install: aircrack-ng + hcxtools)"
@@ -427,13 +431,15 @@ def run_wpa(args) -> int:
     attempts = max(1, args.retries + 1)
     for attempt in range(1, attempts + 1):
         label = "" if attempts == 1 else " (attempt %d of %d)" % (attempt, attempts)
-        print(_c("  capturing WPA handshake on %s (AP %s, ch %s), deauth x%d, "
+        mode = "listening only" if args.no_deauth else "deauth x%d" % args.deauth_count
+        print(_c("  capturing WPA handshake on %s (AP %s, ch %s), %s, "
                  "%gs window%s ..." % (args.iface, args.bssid, args.channel,
-                                       args.deauth_count, args.capture_secs, label),
+                                       mode, args.capture_secs, label),
                  "red", "bold"))
         res = wifi.orchestrate(args.iface, args.bssid, args.channel,
                                client=args.client, count=args.deauth_count,
-                               out=args.wpa_out, capture_secs=args.capture_secs)
+                               out=args.wpa_out, capture_secs=args.capture_secs,
+                               send_deauth=not args.no_deauth)
         for step in res["steps"]:
             print(_c("    - %s" % step, "dim"))
         if res.get("error"):

@@ -1701,7 +1701,7 @@ class TestUi(unittest.TestCase):
         try:
             # category 2, action 3 (WPA), adapter, pick #1, no client, YES to
             # auth, no to crack, then quit
-            answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "n", "q"])
+            answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "", "n", "q"])
             ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
@@ -1738,7 +1738,7 @@ class TestUi(unittest.TestCase):
         wifi.missing_tools = lambda: []
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
-        answers = iter(["2", "3", "wlan1", "1", "", "45", "3", "YES", "q"])
+        answers = iter(["2", "3", "wlan1", "1", "", "45", "3", "YES", "", "q"])
         try:
             ui.run_menu(None, lambda a: (calls.append(a), 3)[1],
                         reader=lambda p="": next(answers, "q"),
@@ -1749,6 +1749,42 @@ class TestUi(unittest.TestCase):
         self.assertEqual(argv[argv.index("--capture-secs") + 1], "45")
         self.assertEqual(argv[argv.index("--retries") + 1], "3")
 
+    def test_menu_listen_only_passes_no_deauth(self):
+        from matt import ui, wifi
+        calls = []
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        wifi.missing_tools = lambda: []
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
+        answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "y", "q"])
+        try:
+            ui.run_menu(None, lambda a: (calls.append(a), 3)[1],
+                        reader=lambda p="": next(answers, "q"),
+                        writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
+        self.assertIn("--no-deauth", calls[0])
+
+    def test_submenu_listen_only_entry_skips_the_deauth_prompt(self):
+        from matt import ui, wifi
+        calls, prompts = [], []
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        wifi.missing_tools = lambda: []
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
+        answers = iter(["2", "4", "wlan1", "1", "", "", "", "YES", "q"])
+
+        def reader(p=""):
+            prompts.append(p)
+            return next(answers, "q")
+        try:
+            ui.run_menu(None, lambda a: (calls.append(a), 3)[1],
+                        reader=reader, writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
+        self.assertIn("--no-deauth", calls[0])
+        self.assertFalse(any("listen only, no deauth" in p for p in prompts))
+
     def test_menu_wpa_failed_capture_offers_no_crack(self):
         from matt import ui, wifi
         calls, prompts = [], []
@@ -1756,7 +1792,7 @@ class TestUi(unittest.TestCase):
         wifi.missing_tools = lambda: []
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
-        answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "q"])
+        answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "", "q"])
 
         def reader(p=""):
             prompts.append(p)
@@ -2800,6 +2836,26 @@ class TestWifiHandshake(unittest.TestCase):
         self.assertFalse(res["ok"], "a stale output file must not count as a handshake")
         self.assertIn("no capture file written", res["steps"])
         self.assertNotIn("hcxpcapngtool", ran)
+
+    def test_orchestrate_listen_only_sends_no_deauth(self):
+        from matt import wifi
+        tmp = self._tmp()
+        ran = []
+        wifi.orchestrate("wlan1", "AA:BB", "6", out=os.path.join(tmp, "hs.22000"),
+                         capture_secs=0.1, prefix=os.path.join(tmp, "cap"),
+                         send_deauth=False, runner=lambda cmd: ran.append(cmd[0]),
+                         popen=lambda cmd: type("P", (), {
+                             "terminate": lambda self: None,
+                             "wait": lambda self, timeout=None: None})(),
+                         which=lambda t: "/usr/bin/" + t)
+        self.assertNotIn("aireplay-ng", ran)
+
+    def test_plan_listen_only_has_no_deauth_step(self):
+        from matt import wifi
+        labels = [label for label, _ in wifi.plan("wlan1", "AA:BB", "6",
+                                                  send_deauth=False)]
+        self.assertNotIn("deauth", labels)
+        self.assertIn("capture", labels)
 
     def test_orchestrate_reaps_the_capture_process_after_terminate(self):
         """orchestrate() called cap.terminate() but never cap.wait(): a

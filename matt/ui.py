@@ -206,6 +206,9 @@ _SUBMENUS = {
          False),
         ("3", "Wi-Fi WPA/WPA2 handshake capture",
          "scan, auto-tune, deauth + capture -> hashcat 22000 -- needs root", False),
+        ("4", "Wi-Fi WPA/WPA2 listen-only capture",
+         "no deauth: catch a handshake when a device reconnects on its own -- "
+         "needs root", False),
     ],
     "3": [
         ("1", "Auto-pick busiest channel + monitor mode",
@@ -349,6 +352,8 @@ def _dispatch_action(category, pick, parser, dispatch, reader, writer, out) -> i
             return _do_llmnr(parser, dispatch, reader, writer, out)
         if pick == "3":
             return _do_wpa(parser, dispatch, reader, writer, out)
+        if pick == "4":
+            return _do_wpa(parser, dispatch, reader, writer, out, listen_only=True)
     elif category == "3":
         if pick == "1":
             return _do_monitor_setup(parser, dispatch, reader, writer, out, auto=True)
@@ -441,7 +446,7 @@ def _do_live(parser, dispatch, reader, writer, out, poison: bool) -> int:
     return dispatch(argv)
 
 
-def _do_wpa(parser, dispatch, reader, writer, out) -> int:
+def _do_wpa(parser, dispatch, reader, writer, out, listen_only: bool = False) -> int:
     """Menu-driven WPA/WPA2 handshake capture: pick the monitor adapter, scan for
     networks, pick one, and MATT auto-detects its channel, sets monitor mode, and
     runs the deauth + capture -> hashcat 22000. The operator never touches iw."""
@@ -505,6 +510,9 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     if ok != "YES":
         writer(paint("  not confirmed -- nothing was run.", "red", stream=out))
         return 2
+    if not listen_only:
+        listen_only = _yes(reader("  listen only, no deauth (wait for a device to "
+                                  "reconnect on its own)? [y/N]: "))
 
     argv = ["--wpa", "--iface", iface, "--bssid", target["bssid"],
             "--channel", str(target["channel"]), "--no-banner",
@@ -515,6 +523,8 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
         argv += ["--capture-secs", secs]
     if retries != "0":
         argv += ["--retries", retries]
+    if listen_only:
+        argv.append("--no-deauth")
     writer("")
     hs_file = "matt-wpa.22000"
     before = os.path.getmtime(hs_file) if os.path.exists(hs_file) else None

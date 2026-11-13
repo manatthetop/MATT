@@ -216,7 +216,8 @@ def convert_22000(cap_file: str, out_file: str) -> list:
 
 
 def plan(iface: str, bssid: str, channel, client: str = None, count: int = 5,
-         prefix: str = "matt-wpa", out: str = "matt-wpa.22000") -> list:
+         prefix: str = "matt-wpa", out: str = "matt-wpa.22000",
+         send_deauth: bool = True) -> list:
     """The ordered recipe (list of (label, command) pairs) for a handshake
     capture: monitor on (iw), lock the channel, channel-locked capture, deauth
     trigger, convert to 22000, monitor off. The single source of truth for both
@@ -225,7 +226,8 @@ def plan(iface: str, bssid: str, channel, client: str = None, count: int = 5,
     steps = [("monitor on", cmd) for cmd in monitor_up(iface)]
     steps.append(("set channel", set_channel(iface, channel)))
     steps.append(("capture", capture(iface, bssid, channel, prefix)))
-    steps.append(("deauth", deauth(iface, bssid, client, count)))
+    if send_deauth:
+        steps.append(("deauth", deauth(iface, bssid, client, count)))
     steps.append(("convert", convert_22000(prefix + "-01.cap", out)))
     steps += [("monitor off", cmd) for cmd in monitor_down(iface)]
     return steps
@@ -317,7 +319,7 @@ def _newest_capture(prefix: str, since: float) -> "str | None":
 def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int = 5,
                 prefix: str = "matt-wpa", out: str = "matt-wpa.22000",
                 capture_secs: float = 20.0, runner=None, popen=None,
-                which=None) -> dict:
+                which=None, send_deauth: bool = True) -> dict:
     """Run the handshake capture for real: set ``iface`` to monitor mode in place,
     lock its channel, start the channel-locked capture in the background, fire a
     short deauth, let it run, stop, convert, and restore managed mode.
@@ -348,8 +350,11 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
     result["steps"].append("capture started")
     try:
         time.sleep(1.0)
-        runner(deauth(iface, bssid, client, count))
-        result["steps"].append("deauth sent")
+        if send_deauth:
+            runner(deauth(iface, bssid, client, count))
+            result["steps"].append("deauth sent")
+        else:
+            result["steps"].append("listening only, no deauth")
         time.sleep(max(1.0, capture_secs))
     finally:
         try:
