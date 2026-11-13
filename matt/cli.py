@@ -181,6 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
     wifi.add_argument("--client", help="client MAC to deauth (default: broadcast)")
     wifi.add_argument("--deauth", type=int, default=5, dest="deauth_count",
                       help="deauth frames to send (0 = continuous; default 5)")
+    wifi.add_argument("--capture-secs", type=float, default=20.0,
+                      help="seconds the handshake capture stays open per attempt "
+                           "(default 20)")
+    wifi.add_argument("--retries", type=int, default=0,
+                      help="extra capture attempts if no handshake is caught "
+                           "(default 0)")
     wifi.add_argument("--wpa-out", default="matt-wpa.22000",
                       help="where the 22000 hash is written (default: matt-wpa.22000)")
     wifi.add_argument("--monitor-setup", action="store_true",
@@ -418,23 +424,30 @@ def run_wpa(args) -> int:
     except PermissionError as exc:
         sys.stderr.write("matt: refusing to run: %s\n" % exc)
         return EXIT_CONFIG
-    print(_c("  capturing WPA handshake on %s (AP %s, ch %s), deauth x%d ..."
-             % (args.iface, args.bssid, args.channel, args.deauth_count),
-             "red", "bold"))
-    res = wifi.orchestrate(args.iface, args.bssid, args.channel, client=args.client,
-                           count=args.deauth_count, out=args.wpa_out)
-    for step in res["steps"]:
-        print(_c("    - %s" % step, "dim"))
-    if res.get("error"):
-        print(_c("  " + res["error"], "red"))
-        return EXIT_LIVE
-    if res["ok"]:
-        print(_c("  [HANDSHAKE] written to %s (hashcat -m 22000)" % res["out"],
-                 "green", "bold"))
-    else:
-        print(_c("  no handshake captured -- try again or raise --deauth.", "dim"))
-        return EXIT_LIVE
-    return EXIT_OK
+    attempts = max(1, args.retries + 1)
+    for attempt in range(1, attempts + 1):
+        label = "" if attempts == 1 else " (attempt %d of %d)" % (attempt, attempts)
+        print(_c("  capturing WPA handshake on %s (AP %s, ch %s), deauth x%d, "
+                 "%gs window%s ..." % (args.iface, args.bssid, args.channel,
+                                       args.deauth_count, args.capture_secs, label),
+                 "red", "bold"))
+        res = wifi.orchestrate(args.iface, args.bssid, args.channel,
+                               client=args.client, count=args.deauth_count,
+                               out=args.wpa_out, capture_secs=args.capture_secs)
+        for step in res["steps"]:
+            print(_c("    - %s" % step, "dim"))
+        if res.get("error"):
+            print(_c("  " + res["error"], "red"))
+            return EXIT_LIVE
+        if res["ok"]:
+            print(_c("  [HANDSHAKE] written to %s (hashcat -m 22000)" % res["out"],
+                     "green", "bold"))
+            return EXIT_OK
+        print(_c("  no handshake captured%s." % label, "dim"))
+    print(_c("  no handshake after %d attempt(s) -- try a longer --capture-secs, "
+             "a closer adapter, or toggle Wi-Fi on the client while capturing."
+             % attempts, "dim"))
+    return EXIT_LIVE
 
 
 def run_monitor_restore(args) -> int:

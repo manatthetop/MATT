@@ -1701,7 +1701,7 @@ class TestUi(unittest.TestCase):
         try:
             # category 2, action 3 (WPA), adapter, pick #1, no client, YES to
             # auth, no to crack, then quit
-            answers = iter(["2", "3", "wlan1", "1", "", "YES", "n", "q"])
+            answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "n", "q"])
             ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
@@ -1723,13 +1723,31 @@ class TestUi(unittest.TestCase):
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
         try:
-            answers = iter(["2", "3", "wlan1", "1", "", "no", "q"])
+            answers = iter(["2", "3", "wlan1", "1", "", "", "", "no", "q"])
             ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
                         reader=lambda p="": next(answers, "q"),
                         writer=lambda *a: None, clear=lambda: None)
         finally:
             wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
         self.assertEqual(calls, [], "WPA must not run without typed authorization")
+
+    def test_menu_wpa_passes_capture_window_and_retries(self):
+        from matt import ui, wifi
+        calls = []
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        wifi.missing_tools = lambda: []
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
+        answers = iter(["2", "3", "wlan1", "1", "", "45", "3", "YES", "q"])
+        try:
+            ui.run_menu(None, lambda a: (calls.append(a), 3)[1],
+                        reader=lambda p="": next(answers, "q"),
+                        writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
+        argv = calls[0]
+        self.assertEqual(argv[argv.index("--capture-secs") + 1], "45")
+        self.assertEqual(argv[argv.index("--retries") + 1], "3")
 
     def test_menu_wpa_failed_capture_offers_no_crack(self):
         from matt import ui, wifi
@@ -1738,7 +1756,7 @@ class TestUi(unittest.TestCase):
         wifi.missing_tools = lambda: []
         wifi.list_aps = lambda iface, runner=None: [
             {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
-        answers = iter(["2", "3", "wlan1", "1", "", "YES", "q"])
+        answers = iter(["2", "3", "wlan1", "1", "", "", "", "YES", "q"])
 
         def reader(p=""):
             prompts.append(p)
@@ -2744,6 +2762,8 @@ class TestWifiHandshake(unittest.TestCase):
             def terminate(self_inner):
                 steps.append("terminate")
 
+        prefix = os.path.join(self._tmp(), "cap")
+
         def runner(cmd):
             steps.append(cmd[1] if len(cmd) > 1 else cmd[0])
             if "hcxpcapngtool" in cmd:
@@ -2752,14 +2772,34 @@ class TestWifiHandshake(unittest.TestCase):
 
         def popen(cmd):
             steps.append("popen")
+            with open(prefix + "-01.cap", "w") as fh:
+                fh.write("pcap")
             return _P()
 
         res = wifi.orchestrate("wlan1", "AA:BB", "6", out=out, capture_secs=0.1,
-                               runner=runner, popen=popen,
+                               prefix=prefix, runner=runner, popen=popen,
                                which=lambda t: "/usr/bin/" + t)
         self.assertTrue(res["ok"])
         self.assertIn("deauth sent", res["steps"])
         self.assertIn("aireplay-ng", steps)
+
+    def test_orchestrate_with_no_capture_file_is_a_failure(self):
+        from matt import wifi
+        tmp = self._tmp()
+        out = os.path.join(tmp, "hs.22000")
+        with open(out, "w") as fh:
+            fh.write("stale from an earlier run")
+        ran = []
+        res = wifi.orchestrate("wlan1", "AA:BB", "6", out=out, capture_secs=0.1,
+                               prefix=os.path.join(tmp, "cap"),
+                               runner=lambda cmd: ran.append(cmd[0]),
+                               popen=lambda cmd: type("P", (), {
+                                   "terminate": lambda self: None,
+                                   "wait": lambda self, timeout=None: None})(),
+                               which=lambda t: "/usr/bin/" + t)
+        self.assertFalse(res["ok"], "a stale output file must not count as a handshake")
+        self.assertIn("no capture file written", res["steps"])
+        self.assertNotIn("hcxpcapngtool", ran)
 
     def test_orchestrate_reaps_the_capture_process_after_terminate(self):
         """orchestrate() called cap.terminate() but never cap.wait(): a

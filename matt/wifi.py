@@ -14,6 +14,7 @@ are pure and testable; nothing here runs until orchestrate() is called.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shutil
@@ -308,6 +309,11 @@ def best_channel_by_activity(iface: str, channels=None, dwell: float = 1.5,
     return results
 
 
+def _newest_capture(prefix: str, since: float) -> "str | None":
+    fresh = [p for p in glob.glob(prefix + "-*.cap") if os.path.getmtime(p) >= since]
+    return max(fresh, key=os.path.getmtime) if fresh else None
+
+
 def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int = 5,
                 prefix: str = "matt-wpa", out: str = "matt-wpa.22000",
                 capture_secs: float = 20.0, runner=None, popen=None,
@@ -328,6 +334,7 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
                                                    stdin=subprocess.DEVNULL,
                                                    start_new_session=True))
     result = {"steps": [], "out": out, "ok": False}
+    started = time.time()
     gone = missing_tools(which or shutil.which)
     if gone:
         result["error"] = "missing tools: " + ", ".join(gone)
@@ -351,9 +358,15 @@ def orchestrate(iface: str, bssid: str, channel, client: str = None, count: int 
         except Exception:
             pass
         result["steps"].append("capture stopped")
-    runner(convert_22000(prefix + "-01.cap", out))
-    result["steps"].append("converted")
-    result["ok"] = os.path.exists(out)
+    # airodump-ng numbers each capture (prefix-01.cap, -02.cap, ...), so convert
+    # the newest file this attempt wrote, never a leftover from an earlier run.
+    newest = _newest_capture(prefix, started)
+    if newest:
+        runner(convert_22000(newest, out))
+        result["steps"].append("converted")
+    else:
+        result["steps"].append("no capture file written")
+    result["ok"] = bool(newest) and os.path.exists(out) and os.path.getmtime(out) >= started
     for cmd in monitor_down(iface):
         runner(cmd)
     result["steps"].append("monitor off")

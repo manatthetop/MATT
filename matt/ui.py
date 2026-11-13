@@ -494,6 +494,8 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     writer(_dim("  target: %s  (BSSID %s, channel %s)"
                 % (target["ssid"], target["bssid"], target["channel"]), out))
     client = reader("  client MAC to deauth [broadcast]: ").strip()
+    secs = reader("  seconds to keep the capture open per attempt [20]: ").strip() or "20"
+    retries = reader("  extra attempts if no handshake is caught [0]: ").strip() or "0"
 
     writer("")
     writer(paint("  A deauth briefly knocks a client off this network to force a "
@@ -509,6 +511,10 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
             "--i-have-written-authorization"]
     if client:
         argv += ["--client", client]
+    if secs != "20":
+        argv += ["--capture-secs", secs]
+    if retries != "0":
+        argv += ["--retries", retries]
     writer("")
     hs_file = "matt-wpa.22000"
     before = os.path.getmtime(hs_file) if os.path.exists(hs_file) else None
