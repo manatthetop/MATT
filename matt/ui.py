@@ -183,6 +183,8 @@ _CATEGORIES = [
     ("5", "Live dashboard",
      "watch findings update, in the terminal or a local web page"),
     ("6", "About / how it works", ""),
+    ("7", "Advanced: type any MATT flags",
+     "every option, including ones not listed above; run matt -h for the list"),
     ("q", "Quit", ""),
 ]
 
@@ -224,10 +226,19 @@ _SUBMENUS = {
          "recover plaintext from the findings -- needs hashcat", True),
         ("2", "Identify / reverse a hash",
          "name its type + hashcat mode, try an instant reversal", False),
+        ("3", "LLM-written prose for a report",
+         "sends the report text to a model endpoint you name -- off by default",
+         False),
+    ],
+    "7": [
+        ("1", "Type MATT flags by hand",
+         "any option, exactly as on the command line -- gates still apply", True),
     ],
     "5": [
         ("1", "Terminal dashboard", "live findings, redraws in place", True),
         ("2", "Web dashboard", "serves a local page instead", False),
+        ("3", "Watch a folder for new reports",
+         "re-analyzes each new capture report as it appears", False),
     ],
 }
 
@@ -254,7 +265,7 @@ def run_menu(parser, dispatch, reader=None, writer=None, clear=None) -> int:
         clear = lambda: _clear(out)
 
     accent = {"1": "green", "2": "red", "3": "cyan", "4": "red", "5": "cyan",
-              "6": "cyan", "q": "dim"}
+              "6": "cyan", "7": "cyan", "q": "dim"}
     last_code = 0
     while True:
         clear()
@@ -366,11 +377,17 @@ def _dispatch_action(category, pick, parser, dispatch, reader, writer, out) -> i
             return _do_analyze(parser, dispatch, reader, writer, out, crack=True)
         if pick == "2":
             return _do_identify(parser, dispatch, reader, writer, out)
+        if pick == "3":
+            return _do_llm(parser, dispatch, reader, writer, out)
     elif category == "5":
         if pick == "1":
             return _do_dashboard(parser, dispatch, reader, writer, out, web=False)
         if pick == "2":
             return _do_dashboard(parser, dispatch, reader, writer, out, web=True)
+        if pick == "3":
+            return _do_watch(parser, dispatch, reader, writer, out)
+    elif category == "7":
+        return _do_advanced(parser, dispatch, reader, writer, out)
     return 0  # pragma: no cover -- unreachable: _run_submenu only returns
               # keys that exist in the category's own list
 
@@ -629,6 +646,56 @@ def _do_dashboard(parser, dispatch, reader, writer, out, web: bool) -> int:
             argv += ["--dashboard-port", port]
     writer("")
     writer(_dim("  Ctrl-C stops the dashboard and returns here.", out))
+    return dispatch(argv)
+
+
+def _do_watch(parser, dispatch, reader, writer, out) -> int:
+    directory = reader("  folder to watch for reports [.]: ").strip() or "."
+    interval = reader("  seconds between checks [5]: ").strip() or "5"
+    writer("")
+    writer(_dim("  Ctrl-C stops watching and returns here.", out))
+    return dispatch(["--watch", directory, "--watch-interval", interval, "--no-banner"])
+
+
+def _do_llm(parser, dispatch, reader, writer, out) -> int:
+    """Written prose from a model. Off by default: the report text leaves this
+    machine for the endpoint named here, so the operator types YES first."""
+    report = reader("  report to analyze [capture_report.json]: ").strip() \
+        or "capture_report.json"
+    writer("")
+    writer(paint("  the report's findings are sent to the model endpoint below.",
+                 "red", "bold", stream=out))
+    url = reader("  model endpoint URL: ").strip()
+    if not url:
+        writer(paint("  no endpoint given -- nothing was run.", "red", stream=out))
+        return 2
+    model = reader("  model name: ").strip()
+    key_env = reader("  env var holding the API key [MATT_API_KEY]: ").strip() \
+        or "MATT_API_KEY"
+    if reader("  type YES to send the report to this endpoint: ").strip() != "YES":
+        writer(paint("  not confirmed -- nothing was sent.", "red", stream=out))
+        return 2
+    argv = ["--analyze-only", report, "--use-model", "--model-url", url,
+            "--api-key-env", key_env, "--no-banner"]
+    if model:
+        argv += ["--model", model]
+    return dispatch(argv)
+
+
+def _do_advanced(parser, dispatch, reader, writer, out) -> int:
+    """Any MATT option, typed as on the command line. Gates still apply: a live
+    or WPA flag still needs its own authorization flag typed here."""
+    import shlex
+    writer(_dim("  e.g.  --analyze-only capture_report.json --table", out))
+    writer(_dim("  run matt -h in a terminal for the full list.", out))
+    line = reader("  matt flags: ").strip()
+    if not line:
+        return 0
+    try:
+        argv = shlex.split(line)
+    except ValueError as exc:
+        writer(paint(f"  could not read those flags: {exc}", "red", stream=out))
+        return 2
     return dispatch(argv)
 
 

@@ -1785,6 +1785,35 @@ class TestUi(unittest.TestCase):
         self.assertIn("--no-deauth", calls[0])
         self.assertFalse(any("listen only, no deauth" in p for p in prompts))
 
+    def test_menu_advanced_passes_typed_flags_through(self):
+        from matt import ui
+        calls = []
+        answers = iter(["7", "1", "--analyze-only capture_report.json --table", "q"])
+        ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
+                    reader=lambda p="": next(answers, "q"),
+                    writer=lambda *a: None, clear=lambda: None)
+        self.assertEqual(calls[0], ["--analyze-only", "capture_report.json", "--table"])
+
+    def test_menu_watch_passes_folder_and_interval(self):
+        from matt import ui
+        calls = []
+        answers = iter(["5", "3", "reports", "10", "q"])
+        ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
+                    reader=lambda p="": next(answers, "q"),
+                    writer=lambda *a: None, clear=lambda: None)
+        argv = calls[0]
+        self.assertEqual(argv[argv.index("--watch") + 1], "reports")
+        self.assertEqual(argv[argv.index("--watch-interval") + 1], "10")
+
+    def test_menu_llm_sends_nothing_without_yes(self):
+        from matt import ui
+        calls = []
+        answers = iter(["4", "3", "", "https://example.invalid/v1", "m", "", "no", "q"])
+        ui.run_menu(None, lambda a: (calls.append(a), 0)[1],
+                    reader=lambda p="": next(answers, "q"),
+                    writer=lambda *a: None, clear=lambda: None)
+        self.assertEqual(calls, [], "LLM prose must not run without typed YES")
+
     def test_menu_wpa_failed_capture_offers_no_crack(self):
         from matt import ui, wifi
         calls, prompts = [], []
