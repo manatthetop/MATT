@@ -1731,6 +1731,26 @@ class TestUi(unittest.TestCase):
             wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
         self.assertEqual(calls, [], "WPA must not run without typed authorization")
 
+    def test_menu_wpa_failed_capture_offers_no_crack(self):
+        from matt import ui, wifi
+        calls, prompts = [], []
+        orig_aps, orig_missing = wifi.list_aps, wifi.missing_tools
+        wifi.missing_tools = lambda: []
+        wifi.list_aps = lambda iface, runner=None: [
+            {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Net", "channel": 6, "signal": -50.0}]
+        answers = iter(["2", "3", "wlan1", "1", "", "YES", "q"])
+
+        def reader(p=""):
+            prompts.append(p)
+            return next(answers, "q")
+        try:
+            ui.run_menu(None, lambda a: (calls.append(a), 3)[1],
+                        reader=reader, writer=lambda *a: None, clear=lambda: None)
+        finally:
+            wifi.list_aps, wifi.missing_tools = orig_aps, orig_missing
+        self.assertTrue(calls, "WPA capture was not dispatched")
+        self.assertFalse(any("crack the captured handshake" in p for p in prompts))
+
     def test_menu_mitm_requires_typed_authorization(self):
         """Choosing live MITM but not typing YES must run nothing and return 2."""
         from matt import ui

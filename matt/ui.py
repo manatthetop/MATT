@@ -510,10 +510,16 @@ def _do_wpa(parser, dispatch, reader, writer, out) -> int:
     if client:
         argv += ["--client", client]
     writer("")
+    hs_file = "matt-wpa.22000"
+    before = os.path.getmtime(hs_file) if os.path.exists(hs_file) else None
     code = dispatch(argv)
-    # offer to crack a captured handshake straight away
+    captured = (code == 0 and os.path.exists(hs_file)
+                and os.path.getmtime(hs_file) != before)
+    if not captured:
+        return code
+    # offer to crack a handshake this run actually produced
     if _yes(reader("  crack the captured handshake now with hashcat? [y/N]: ")):
-        argv = ["--analyze-only", "matt-wpa.22000", "--crack", "--no-banner",
+        argv = ["--analyze-only", hs_file, "--crack", "--no-banner",
                 "--ssid", target["ssid"]]
         wl = _pick_wordlist(reader, writer, out)
         if wl:

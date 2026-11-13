@@ -433,6 +433,7 @@ def run_wpa(args) -> int:
                  "green", "bold"))
     else:
         print(_c("  no handshake captured -- try again or raise --deauth.", "dim"))
+        return EXIT_LIVE
     return EXIT_OK
 
 
