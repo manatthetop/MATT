@@ -6,6 +6,10 @@ All notable changes to MATT are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **TLS decryption from a key log (`--keylog PATH`).** A live capture is saved
+  as a pcap, and tshark decrypts each TLS session using the browser or app's
+  `SSLKEYLOGFILE`. The plaintext goes through the existing decoders, so HTTPS
+  logins are recovered like plaintext ones. The pcap is kept beside the report.
 - **Windows installer (`install.ps1`)** — a one-line PowerShell install
   (`irm .../install.ps1 | iex`) that downloads the latest `matt.pyz`
   release and the offline demo capture, creates a `matt` command, and adds

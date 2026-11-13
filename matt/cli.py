@@ -31,6 +31,7 @@ import time
 from . import capture as _capture
 from . import core as _core
 from . import model as _model
+from . import tlsdecrypt as _tlsdecrypt
 
 try:
     from . import __version__ as _VERSION
@@ -110,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="cap the capture at N packets (default: 0 = no cap, "
                            "bounded only by --duration so a busy link is not "
                            "truncated to its first frames)")
+    live.add_argument("--keylog", metavar="PATH", default=None,
+                      help="TLS key log written by a browser or app (SSLKEYLOGFILE) "
+                           "to decrypt HTTPS in the capture; the raw pcap is kept "
+                           "beside the report")
     live.add_argument("--dry-run", action="store_true",
                       help="show what would run without touching the network")
     live.add_argument("--watch", metavar="DIR",
@@ -1018,16 +1023,29 @@ def run_live(args, parser) -> int:
             print(_c("  enabled net.ipv4.ip_forward (needed so poisoned traffic "
                      "actually passes through this host)", "dim"))
 
+    pcap_path = None
+    if args.keylog:
+        pcap_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.report)) or ".", "matt-live.pcap")
     t0 = time.monotonic()
     try:
         sniff = _capture.capture_payloads(
             args.iface, duration=args.duration, capture_tool=args.capture_tool,
-            runner=args.runner, max_packets=args.max_packets)
+            runner=args.runner, max_packets=args.max_packets, pcap_path=pcap_path)
     finally:
         if poison.get("pid"):
             _capture.stop_poison(poison)
 
     payloads = sniff["payloads"]
+    if args.keylog:
+        if pcap_path and os.path.isfile(pcap_path):
+            tls = _tlsdecrypt.decrypt_pcap(pcap_path, args.keylog)
+        else:
+            tls = {"streams": 0, "payloads": [], "note": "no pcap was saved, "
+                   "so there was nothing to decrypt"}
+        payloads.extend(tls["payloads"])
+        sniff["tls_keylog"] = {k: v for k, v in tls.items() if k != "payloads"}
+        sniff["tls_keylog"]["decrypted"] = len(tls["payloads"])
     hosts = {"the wire": {"payloads": payloads}}
 
     versions = {}
@@ -1071,6 +1089,12 @@ def run_live(args, parser) -> int:
     print(f"  gateway:             {gateway}")
     print(f"  clients seen:        {len(clients)}")
     print(f"  payloads captured:   {len(payloads)}")
+    if args.keylog:
+        tls_info = sniff["tls_keylog"]
+        print(f"  TLS sessions:        {tls_info['streams']} "
+              f"({tls_info['decrypted']} payload(s) decrypted)")
+        if tls_info.get("note"):
+            print(f"  TLS note:            {tls_info['note']}")
     print(f"  candidates decoded:  {stats['candidate_count']}")
     print(f"  credential-bearing:  "
           + (_c(str(cb), "green", "bold") if cb else _c(str(cb), "dim")))

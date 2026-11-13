@@ -87,6 +87,23 @@ sudo matt --iface wlan0 --duration 60 --i-have-written-authorization
 > ARP poisoning rewrites other people's traffic. Only run it on a network you
 > are authorized to test.
 
+### Decrypt HTTPS with a TLS key log (`--keylog`)
+
+Encrypted TLS can be read when the browser or app writes its session secrets to
+a key log file (`SSLKEYLOGFILE`). MATT hands that file to tshark, which decrypts
+the matching sessions and feeds the plaintext to the same decoders.
+
+```bash
+export SSLKEYLOGFILE=$HOME/keys.log        # set before starting the browser/app
+sudo matt --iface wlan0 --duration 60 --i-have-written-authorization \
+     --keylog $HOME/keys.log
+```
+
+- The raw capture is saved as `matt-live.pcap` beside the report.
+- Decryption runs after the capture window, using every key line written up to
+  then. A session whose handshake began before the window cannot be decrypted.
+- Needs `tshark` and `tcpdump`.
+
 ## 4. Crack this now (hashcat)
 
 Turn the captured hashes into real passwords. Add `--crack` to any analyze or

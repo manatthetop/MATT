@@ -523,7 +523,8 @@ def strip_wire_headers(raw: bytes) -> bytes:
 
 
 def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None,
-                     dry_run: bool = False, runner=None, max_packets: int = 0) -> dict:
+                     dry_run: bool = False, runner=None, max_packets: int = 0,
+                     pcap_path: str = None) -> dict:
     """Grab payload bytes for ``duration`` seconds and return raw hex payloads.
 
     Uses ``tcpdump -i IFACE -X -s 0`` and treats its hexdump output as the
@@ -551,11 +552,17 @@ def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None
         return result
 
     cap = ["-c", str(max_packets)] if max_packets and max_packets > 0 else []
+    if pcap_path and tool != "tcpdump":
+        result["note"] = "--keylog needs tcpdump to save the capture as a pcap"
+        return result
     if tool == "tcpdump":
         # -X dumps each packet as hex + an ASCII gutter, which is exactly the
         # layout hexdump_row() parses. Without a hex flag tcpdump prints only
-        # summary lines, so no payload is ever recovered.
-        cmd = [tool, "-i", iface, "-nn", "-X", "-s", "0"] + cap
+        # summary lines, so no payload is ever recovered. With pcap_path the
+        # capture is saved instead and read back with -X afterwards, so the
+        # same parser still sees every packet.
+        dump = ["-w", pcap_path] if pcap_path else ["-X"]
+        cmd = [tool, "-i", iface, "-nn"] + dump + ["-s", "0"] + cap
         # tcpdump has no "run for N seconds then exit" flag that still prints to
         # stdout. Bound it with the `timeout` coreutil: at the duration it sends
         # SIGINT, tcpdump catches it, flushes its hex to stdout, and exits 0,
@@ -571,9 +578,13 @@ def capture_payloads(iface: str, duration: float = 5.0, capture_tool: str = None
         cmd = [tool, "-i", iface, "-x", "-a", "duration:%d" % max(1, int(duration))] + cap
 
     run = runner or (lambda c, kwargs: subprocess.run(c, **kwargs))
+    opts = {"capture_output": True, "text": True,
+            "timeout": duration + 15, "check": False}
     try:
-        proc = run(cmd, {"capture_output": True, "text": True,
-                         "timeout": duration + 15, "check": False})
+        proc = run(cmd, opts)
+        if pcap_path:
+            result["pcap"] = pcap_path
+            proc = run(["tcpdump", "-nn", "-X", "-s", "0", "-r", pcap_path], opts)
     except subprocess.TimeoutExpired:
         result["note"] = f"{tool} exceeded {duration + 15}s and was stopped"
         return result
